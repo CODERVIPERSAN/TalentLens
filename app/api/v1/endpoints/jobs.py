@@ -1,10 +1,12 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-from typing import List
+from typing import List, Optional
+from app.api.deps import get_optional_current_user
 from app.db.session import get_db
 from app.schemas.job import Job, JobCreate, JobUpdate
 from app.db.models.job import Job as JobModel
+from app.db.models.user import User as UserModel
 
 router = APIRouter()
 
@@ -12,10 +14,11 @@ router = APIRouter()
 @router.post("/", response_model=Job)
 async def create_job(
     job_in: JobCreate,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    current_user: Optional[UserModel] = Depends(get_optional_current_user),
 ):
-    # TODO: Get owner_id from authentication
-    job = JobModel(**job_in.model_dump(), owner_id=1)
+    owner_id = current_user.id if current_user else None
+    job = JobModel(**job_in.model_dump(), owner_id=owner_id)
     db.add(job)
     await db.commit()
     await db.refresh(job)

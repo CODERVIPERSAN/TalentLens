@@ -1,7 +1,7 @@
 from sqlalchemy import Column, String, Text, Float, JSON, ForeignKey
 from sqlalchemy.orm import relationship
 from app.db.models.base import BaseMixin
-from app.db.base import Base
+from app.db.base_class import Base
 
 
 class Candidate(Base, BaseMixin):

@@ -38,7 +38,7 @@ class CandidateUpdate(BaseModel):
 
 class CandidateInDB(CandidateBase):
     id: int
-    embedding: Optional[Dict[str, Any]] = None
+    embedding: Optional[List[float]] = None
     created_at: datetime
     updated_at: datetime
 

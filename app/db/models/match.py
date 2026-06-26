@@ -1,7 +1,7 @@
-from sqlalchemy import Column, String, Float, JSON, ForeignKey
+from sqlalchemy import Column, Integer, String, Float, JSON, ForeignKey
 from sqlalchemy.orm import relationship
 from app.db.models.base import BaseMixin
-from app.db.base import Base
+from app.db.base_class import Base
 
 
 class Match(Base, BaseMixin):

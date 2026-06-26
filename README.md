@@ -14,10 +14,8 @@ TalentLens is an AI-powered talent intelligence platform that analyzes candidate
 ### Backend
 - FastAPI - Modern Python web framework
 - SQLAlchemy - Async ORM for database operations
-- PostgreSQL - Primary database
-- OpenAI - AI-powered analysis
-- Sentence Transformers - Semantic embeddings
-- FAISS - Vector similarity search
+- SQLite (default) / PostgreSQL - Database
+- OpenAI - Optional AI-powered analysis (falls back to a built-in local engine)
 
 ### Frontend
 - React - UI library
@@ -30,7 +28,9 @@ TalentLens is an AI-powered talent intelligence platform that analyzes candidate
 ### Prerequisites
 - Python 3.9+
 - Node.js 18+
-- PostgreSQL 14+
+
+The app runs out of the box on SQLite with no external services. PostgreSQL and
+an OpenAI API key are both optional (see `.env.example`).
 
 ### Backend Setup
 
@@ -42,15 +42,10 @@ pip install -r requirements.txt
 2. Set up environment variables:
 ```bash
 cp .env.example .env
-# Edit .env with your configuration
+# Defaults work as-is (SQLite, no OpenAI key). Edit only to customize.
 ```
 
-3. Initialize the database:
-```bash
-alembic upgrade head
-```
-
-4. Run the server:
+3. Run the server (database tables are created automatically on startup):
 ```bash
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```

@@ -26,14 +26,21 @@ async def find_best_matches(
     # Get all candidates
     candidates_result = await db.execute(select(Candidate))
     candidates = candidates_result.scalars().all()
-    
+
+    # Ensure the job has an embedding (generate and persist on demand).
+    if not job.embedding:
+        job.embedding = await generate_job_embedding(job)
+
     matches = []
-    
+    embeddings_changed = False
+
     for candidate in candidates:
-        # Skip if candidate has no embedding
-        if not candidate.embedding or not job.embedding:
-            continue
-        
+        # Generate and persist embeddings on demand so matching works without
+        # a separate embedding step.
+        if not candidate.embedding:
+            candidate.embedding = await generate_candidate_embedding(candidate)
+            embeddings_changed = True
+
         # Analyze match
         match_analysis = analyze_candidate_job_match(
             candidate_skills=candidate.skills or [],
@@ -52,9 +59,13 @@ async def find_best_matches(
             "analysis": match_analysis
         })
     
+    # Persist any embeddings generated on demand.
+    if embeddings_changed or job.embedding is not None:
+        await db.commit()
+
     # Sort by match score
     matches.sort(key=lambda x: x["match_score"], reverse=True)
-    
+
     return matches[:limit]
 
 
