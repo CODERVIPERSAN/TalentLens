@@ -13,3 +13,4 @@ python-dotenv
 httpx
 aiofiles
 numpy
+scikit-learn

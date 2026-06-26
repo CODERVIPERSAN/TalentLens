@@ -1,74 +1,99 @@
-import { useState } from 'react'
-import { Plus, Search, MoreVertical } from 'lucide-react'
+import { Briefcase, MapPin, Clock, CheckCircle, XCircle } from 'lucide-react'
+
+const REQUIREMENTS = [
+  {
+    category: 'Must Have',
+    items: [
+      'Production embeddings-based retrieval (sentence-transformers, BGE, E5)',
+      'Vector DB / hybrid search (FAISS, Pinecone, Weaviate, Elasticsearch)',
+      'Strong Python with production code quality',
+      'Ranking evaluation frameworks (NDCG, MRR, MAP, A/B testing)',
+    ],
+  },
+  {
+    category: 'Nice to Have',
+    items: [
+      'LLM fine-tuning (LoRA, QLoRA, PEFT)',
+      'Learning-to-rank models (XGBoost, neural)',
+      'HR-tech / marketplace product experience',
+      'Distributed systems / inference optimization',
+    ],
+  },
+  {
+    category: 'Disqualifiers',
+    items: [
+      'Pure research background without production deployment',
+      'Only LangChain + OpenAI experience (under 12 months)',
+      'Entire career at consulting firms (TCS, Infosys, Wipro, etc.)',
+      'Computer vision / robotics without NLP/IR exposure',
+    ],
+  },
+]
+
+const JOB_DETAILS = {
+  title: 'Senior AI Engineer — Founding Team',
+  company: 'Redrob AI',
+  location: 'Pune/Noida, India (Hybrid)',
+  experience: '5–9 years (flexible with strong signals)',
+  notice: 'Sub-30 days preferred',
+}
 
 export default function Jobs() {
-  const [jobs] = useState([
-    { id: 1, title: 'Senior Software Engineer', location: 'Remote', status: 'active', applicants: 45 },
-    { id: 2, title: 'Product Manager', location: 'San Francisco', status: 'active', applicants: 32 },
-    { id: 3, title: 'Data Scientist', location: 'New York', status: 'draft', applicants: 0 },
-  ])
-
-  const getStatusColor = (status) => {
-    switch (status) {
-      case 'active': return 'bg-green-100 text-green-700'
-      case 'draft': return 'bg-gray-100 text-gray-700'
-      case 'closed': return 'bg-red-100 text-red-700'
-      default: return 'bg-gray-100 text-gray-700'
-    }
-  }
-
   return (
     <div>
-      <div className="flex justify-between items-center mb-8">
-        <h2 className="text-3xl font-bold text-gray-900">Jobs</h2>
-        <button className="flex items-center px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700">
-          <Plus className="w-4 h-4 mr-2" />
-          Create Job
-        </button>
+      <div className="mb-8">
+        <h2 className="text-3xl font-bold text-gray-900">Job Description</h2>
+        <p className="text-gray-500 mt-1">Target role for candidate ranking</p>
       </div>
-      
-      <div className="bg-white rounded-lg shadow">
-        <div className="p-4 border-b">
-          <div className="relative">
-            <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 w-5 h-5" />
-            <input
-              type="text"
-              placeholder="Search jobs..."
-              className="pl-10 pr-4 py-2 w-full border rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
-            />
+
+      <div className="bg-white rounded-lg shadow p-6 mb-6">
+        <h3 className="text-xl font-semibold text-gray-900 mb-4">{JOB_DETAILS.title}</h3>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
+          <div className="flex items-center text-gray-600">
+            <Briefcase className="w-4 h-4 mr-2 text-indigo-500" />
+            {JOB_DETAILS.company}
+          </div>
+          <div className="flex items-center text-gray-600">
+            <MapPin className="w-4 h-4 mr-2 text-indigo-500" />
+            {JOB_DETAILS.location}
+          </div>
+          <div className="flex items-center text-gray-600">
+            <Clock className="w-4 h-4 mr-2 text-indigo-500" />
+            {JOB_DETAILS.experience}
+          </div>
+          <div className="flex items-center text-gray-600">
+            <CheckCircle className="w-4 h-4 mr-2 text-green-500" />
+            Notice: {JOB_DETAILS.notice}
           </div>
         </div>
-        
-        <table className="w-full">
-          <thead className="bg-gray-50">
-            <tr>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Title</th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Location</th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Applicants</th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
-            </tr>
-          </thead>
-          <tbody className="bg-white divide-y divide-gray-200">
-            {jobs.map((job) => (
-              <tr key={job.id} className="hover:bg-gray-50">
-                <td className="px-6 py-4 whitespace-nowrap font-medium text-gray-900">{job.title}</td>
-                <td className="px-6 py-4 whitespace-nowrap text-gray-500">{job.location}</td>
-                <td className="px-6 py-4 whitespace-nowrap">
-                  <span className={`px-2 py-1 text-xs font-medium rounded ${getStatusColor(job.status)}`}>
-                    {job.status}
-                  </span>
-                </td>
-                <td className="px-6 py-4 whitespace-nowrap text-gray-500">{job.applicants}</td>
-                <td className="px-6 py-4 whitespace-nowrap">
-                  <button className="text-gray-400 hover:text-gray-600">
-                    <MoreVertical className="w-5 h-5" />
-                  </button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <p className="mt-4 text-gray-600">
+          Own the intelligence layer of Redrob's product — ranking, retrieval, and matching
+          systems. Ship a v2 ranking system with embeddings and hybrid retrieval. Set up
+          evaluation infrastructure with offline benchmarks and A/B testing.
+        </p>
+      </div>
+
+      <div className="space-y-6">
+        {REQUIREMENTS.map(({ category, items }) => (
+          <div key={category} className="bg-white rounded-lg shadow p-6">
+            <h4 className="text-lg font-semibold text-gray-900 mb-3 flex items-center">
+              {category === 'Disqualifiers' ? (
+                <XCircle className="w-5 h-5 mr-2 text-red-500" />
+              ) : (
+                <CheckCircle className="w-5 h-5 mr-2 text-green-500" />
+              )}
+              {category}
+            </h4>
+            <ul className="space-y-2">
+              {items.map((item) => (
+                <li key={item} className="text-gray-600 text-sm flex items-start">
+                  <span className="mr-2 mt-1.5 w-1.5 h-1.5 rounded-full bg-indigo-400 flex-shrink-0" />
+                  {item}
+                </li>
+              ))}
+            </ul>
+          </div>
+        ))}
       </div>
     </div>
   )

@@ -8,14 +8,14 @@ import Matches from './pages/Matches'
 function App() {
   return (
     <Router>
-      <Layout>
-        <Routes>
-          <Route path="/" element={<Dashboard />} />
-          <Route path="/candidates" element={<Candidates />} />
-          <Route path="/jobs" element={<Jobs />} />
-          <Route path="/matches" element={<Matches />} />
-        </Routes>
-      </Layout>
+      <Routes>
+        <Route path="/" element={<Layout />}>
+          <Route index element={<Dashboard />} />
+          <Route path="candidates" element={<Candidates />} />
+          <Route path="jobs" element={<Jobs />} />
+          <Route path="matches" element={<Matches />} />
+        </Route>
+      </Routes>
     </Router>
   )
 }

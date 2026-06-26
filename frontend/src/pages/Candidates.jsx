@@ -1,23 +1,40 @@
-import { useState } from 'react'
-import { Plus, Search, MoreVertical } from 'lucide-react'
+import { useEffect, useState } from 'react'
+import { Search, Loader2 } from 'lucide-react'
+import { getCandidates } from '../api/client'
 
 export default function Candidates() {
-  const [candidates] = useState([
-    { id: 1, name: 'John Doe', email: 'john@example.com', skills: ['Python', 'React', 'AWS'], experience: 5, matchScore: 85 },
-    { id: 2, name: 'Jane Smith', email: 'jane@example.com', skills: ['Java', 'Spring', 'PostgreSQL'], experience: 7, matchScore: 92 },
-    { id: 3, name: 'Bob Johnson', email: 'bob@example.com', skills: ['JavaScript', 'Node.js', 'MongoDB'], experience: 3, matchScore: 78 },
-  ])
+  const [candidates, setCandidates] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [search, setSearch] = useState('')
+  const [error, setError] = useState(null)
+
+  useEffect(() => {
+    getCandidates(0, 50)
+      .then(setCandidates)
+      .catch((err) => setError(err.message))
+      .finally(() => setLoading(false))
+  }, [])
+
+  const filtered = candidates.filter((c) => {
+    const q = search.toLowerCase()
+    return (
+      c.name?.toLowerCase().includes(q) ||
+      c.title?.toLowerCase().includes(q) ||
+      c.skills?.some((s) => s.toLowerCase().includes(q))
+    )
+  })
 
   return (
     <div>
       <div className="flex justify-between items-center mb-8">
         <h2 className="text-3xl font-bold text-gray-900">Candidates</h2>
-        <button className="flex items-center px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700">
-          <Plus className="w-4 h-4 mr-2" />
-          Add Candidate
-        </button>
+        <span className="text-sm text-gray-500">Sample pool from challenge dataset</span>
       </div>
-      
+
+      {error && (
+        <div className="mb-4 p-4 bg-red-50 border border-red-200 rounded-lg text-red-700">{error}</div>
+      )}
+
       <div className="bg-white rounded-lg shadow">
         <div className="p-4 border-b">
           <div className="relative">
@@ -25,55 +42,56 @@ export default function Candidates() {
             <input
               type="text"
               placeholder="Search candidates..."
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
               className="pl-10 pr-4 py-2 w-full border rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
             />
           </div>
         </div>
-        
-        <table className="w-full">
-          <thead className="bg-gray-50">
-            <tr>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Name</th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Email</th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Skills</th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Experience</th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Match Score</th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
-            </tr>
-          </thead>
-          <tbody className="bg-white divide-y divide-gray-200">
-            {candidates.map((candidate) => (
-              <tr key={candidate.id} className="hover:bg-gray-50">
-                <td className="px-6 py-4 whitespace-nowrap font-medium text-gray-900">{candidate.name}</td>
-                <td className="px-6 py-4 whitespace-nowrap text-gray-500">{candidate.email}</td>
-                <td className="px-6 py-4 whitespace-nowrap">
-                  <div className="flex flex-wrap gap-1">
-                    {candidate.skills.map((skill) => (
-                      <span key={skill} className="px-2 py-1 text-xs bg-indigo-100 text-indigo-700 rounded">
-                        {skill}
-                      </span>
-                    ))}
-                  </div>
-                </td>
-                <td className="px-6 py-4 whitespace-nowrap text-gray-500">{candidate.experience} years</td>
-                <td className="px-6 py-4 whitespace-nowrap">
-                  <span className={`px-2 py-1 text-xs font-medium rounded ${
-                    candidate.matchScore >= 80 ? 'bg-green-100 text-green-700' :
-                    candidate.matchScore >= 60 ? 'bg-yellow-100 text-yellow-700' :
-                    'bg-red-100 text-red-700'
-                  }`}>
-                    {candidate.matchScore}%
-                  </span>
-                </td>
-                <td className="px-6 py-4 whitespace-nowrap">
-                  <button className="text-gray-400 hover:text-gray-600">
-                    <MoreVertical className="w-5 h-5" />
-                  </button>
-                </td>
+
+        {loading ? (
+          <div className="p-8 flex justify-center text-gray-500">
+            <Loader2 className="w-6 h-6 animate-spin mr-2" />
+            Loading candidates...
+          </div>
+        ) : (
+          <table className="w-full">
+            <thead className="bg-gray-50">
+              <tr>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">ID</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Title</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Location</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Skills</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Experience</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody className="divide-y divide-gray-200">
+              {filtered.map((candidate) => (
+                <tr key={candidate.candidate_id} className="hover:bg-gray-50">
+                  <td className="px-6 py-4 whitespace-nowrap text-xs text-gray-400 font-mono">
+                    {candidate.candidate_id}
+                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap font-medium text-gray-900">{candidate.name}</td>
+                  <td className="px-6 py-4 whitespace-nowrap text-gray-500">{candidate.title}</td>
+                  <td className="px-6 py-4 whitespace-nowrap text-gray-500">{candidate.location}</td>
+                  <td className="px-6 py-4">
+                    <div className="flex flex-wrap gap-1">
+                      {candidate.skills?.map((skill) => (
+                        <span key={skill} className="px-2 py-1 text-xs bg-indigo-100 text-indigo-700 rounded">
+                          {skill}
+                        </span>
+                      ))}
+                    </div>
+                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap text-gray-500">
+                    {candidate.years_of_experience?.toFixed?.(1) ?? candidate.years_of_experience} yrs
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
       </div>
     </div>
   )
