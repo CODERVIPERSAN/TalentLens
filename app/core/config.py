@@ -1,5 +1,6 @@
 from pydantic_settings import BaseSettings
-from typing import List
+from typing import List, Union
+from pydantic import field_validator
 
 
 class Settings(BaseSettings):
@@ -21,7 +22,20 @@ class Settings(BaseSettings):
     
     REDIS_URL: str = "redis://localhost:6379/0"
     
-    ALLOWED_ORIGINS: List[str] = ["http://localhost:3000", "http://localhost:8000"]
+    ALLOWED_ORIGINS: Union[str, List[str]] = "http://localhost:3000,http://localhost:8000"
+    
+    @field_validator('ALLOWED_ORIGINS', mode='before')
+    @classmethod
+    def parse_allowed_origins(cls, v):
+        if isinstance(v, str):
+            return [origin.strip() for origin in v.split(",")]
+        return v
+    
+    @property
+    def allowed_origins_list(self) -> List[str]:
+        if isinstance(self.ALLOWED_ORIGINS, str):
+            return [origin.strip() for origin in self.ALLOWED_ORIGINS.split(",")]
+        return self.ALLOWED_ORIGINS
     
     class Config:
         env_file = ".env"

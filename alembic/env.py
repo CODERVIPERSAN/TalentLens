@@ -18,8 +18,9 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# Set the database URL from settings
-config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
+# Set the database URL from settings (replace sqlite+aiosqlite with sqlite for alembic)
+db_url = settings.DATABASE_URL.replace("sqlite+aiosqlite://", "sqlite://")
+config.set_main_option("sqlalchemy.url", db_url)
 
 # add your model's MetaData object here
 target_metadata = Base.metadata

@@ -1,7 +1,7 @@
-from sqlalchemy import Column, String, Text, Float, JSON, ForeignKey, Enum, Boolean
+from sqlalchemy import Column, String, Text, Float, JSON, ForeignKey, Enum, Boolean, Integer, DateTime
 from sqlalchemy.orm import relationship
 import enum
-from app.db.models.base import BaseMixin
+from datetime import datetime
 from app.db.base import Base
 
 
@@ -11,9 +11,10 @@ class JobStatus(str, enum.Enum):
     CLOSED = "closed"
 
 
-class Job(Base, BaseMixin):
+class Job(Base):
     __tablename__ = "jobs"
     
+    id = Column(Integer, primary_key=True, index=True)
     title = Column(String, nullable=False)
     description = Column(Text, nullable=False)
     requirements = Column(JSON)
@@ -25,8 +26,9 @@ class Job(Base, BaseMixin):
     remote = Column(Boolean, default=False)
     status = Column(Enum(JobStatus), default=JobStatus.DRAFT)
     embedding = Column(JSON)
-    
     owner_id = Column(Integer, ForeignKey("users.id"))
-    owner = relationship("User", back_populates="jobs")
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
     
+    owner = relationship("User", back_populates="jobs")
     matches = relationship("Match", back_populates="job")

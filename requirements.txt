@@ -1,14 +1,15 @@
 fastapi
 uvicorn[standard]
-pydantic
+pydantic[email]
 pydantic-settings
 python-multipart
 sqlalchemy
 alembic
-psycopg[binary]
+aiosqlite
 openai
 python-jose[cryptography]
 passlib[bcrypt]
 python-dotenv
 httpx
 aiofiles
+numpy
