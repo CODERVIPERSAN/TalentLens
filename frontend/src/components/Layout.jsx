@@ -1,7 +1,7 @@
-import { Outlet, Link } from 'react-router-dom'
+import { Link } from 'react-router-dom'
 import { Users, Briefcase, Target, Home } from 'lucide-react'
 
-export default function Layout() {
+export default function Layout({ children }) {
   return (
     <div className="min-h-screen bg-gray-50">
       <nav className="bg-white shadow-sm border-b">
@@ -46,7 +46,7 @@ export default function Layout() {
         </div>
       </nav>
       <main className="max-w-7xl mx-auto py-6 sm:px-6 lg:px-8">
-        <Outlet />
+        {children}
       </main>
     </div>
   )

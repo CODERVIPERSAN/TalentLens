@@ -42,8 +42,8 @@ class JobUpdate(BaseModel):
 
 class JobInDB(JobBase):
     id: int
-    owner_id: int
-    embedding: Optional[Dict[str, Any]] = None
+    owner_id: Optional[int] = None
+    embedding: Optional[List[float]] = None
     created_at: datetime
     updated_at: datetime
 

@@ -1,8 +1,8 @@
-from sqlalchemy import Column, String, Text, Float, JSON, ForeignKey, Enum, Boolean
+from sqlalchemy import Column, Integer, String, Text, Float, JSON, ForeignKey, Enum, Boolean
 from sqlalchemy.orm import relationship
 import enum
 from app.db.models.base import BaseMixin
-from app.db.base import Base
+from app.db.base_class import Base
 
 
 class JobStatus(str, enum.Enum):
