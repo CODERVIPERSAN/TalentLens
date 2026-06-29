@@ -1,0 +1,42 @@
+{
+  "job_id": "REDROB_SENIOR_AI_ENGINEER",
+  "title": "Senior AI Engineer — Founding Team",
+  "company": "Redrob AI",
+  "location": "Pune/Noida, India (Hybrid)",
+  "employment_type": "Full-time",
+  "experience_range": "5–9 years",
+  "notice_period": "Sub-30 days preferred",
+  "status": "active",
+  "summary": "Own the intelligence layer of Redrob's product — ranking, retrieval, and matching systems that decide what recruiters and candidates see.",
+  "mandate": [
+    "Audit current BM25 + rule-based scoring and identify highest-leverage fixes",
+    "Ship a v2 ranking system with embeddings and hybrid retrieval",
+    "Set up evaluation infrastructure — offline benchmarks, A/B testing, recruiter feedback loops"
+  ],
+  "must_have": [
+    "Production embeddings-based retrieval (sentence-transformers, BGE, E5, OpenAI embeddings)",
+    "Vector DB / hybrid search (FAISS, Pinecone, Weaviate, Qdrant, Elasticsearch, OpenSearch)",
+    "Strong Python with production code quality",
+    "Ranking evaluation frameworks (NDCG, MRR, MAP, offline-to-online correlation, A/B testing)"
+  ],
+  "nice_to_have": [
+    "LLM fine-tuning (LoRA, QLoRA, PEFT)",
+    "Learning-to-rank models (XGBoost-based or neural)",
+    "HR-tech / recruiting tech / marketplace product experience",
+    "Distributed systems or large-scale inference optimization",
+    "Open-source contributions in AI/ML"
+  ],
+  "disqualifiers": [
+    "Pure research environments without production deployment",
+    "AI experience only via LangChain + OpenAI under 12 months without prior ML production",
+    "Senior engineer who hasn't written production code in 18+ months",
+    "Entire career at consulting firms (TCS, Infosys, Wipro, Accenture, Cognizant, Capgemini)",
+    "Computer vision / speech / robotics without significant NLP/IR exposure"
+  ],
+  "hackathon_notes": [
+    "Keyword stuffing in skills is a trap — title and career history matter more",
+    "Tier-5 candidates may not say RAG/Pinecone but built recommendation systems at product companies",
+    "Behavioral signals matter: inactive candidates with low response rates should be down-weighted",
+    "Honeypot profiles with impossible timelines must be filtered (>10% in top-100 disqualifies)"
+  ]
+}

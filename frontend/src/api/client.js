@@ -10,17 +10,27 @@ export async function getStats() {
   return data
 }
 
-export async function getCandidates(skip = 0, limit = 50) {
-  const { data } = await api.get('/challenge/candidates', { params: { skip, limit } })
+export async function getJob() {
+  const { data } = await api.get('/challenge/job')
   return data
 }
 
-export async function runRanking(topN = 50) {
-  const { data } = await api.post('/challenge/rank', { use_sample: true, top_n: topN })
+export async function getCandidates(skip = 0, limit = 50, useSample = true) {
+  const { data } = await api.get('/challenge/candidates', {
+    params: { skip, limit, use_sample: useSample },
+  })
   return data
 }
 
-export async function getRankings(limit = 50) {
+export async function runRanking(topN = 50, useSample = true) {
+  const { data } = await api.post('/challenge/rank', {
+    use_sample: useSample,
+    top_n: topN,
+  })
+  return data
+}
+
+export async function getRankings(limit = 100) {
   const { data } = await api.get('/challenge/rankings', { params: { limit } })
   return data
 }
