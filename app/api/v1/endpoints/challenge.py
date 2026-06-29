@@ -1,14 +1,14 @@
+import csv
+import io
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from app.services.challenge_data import (
-    get_candidates_path,
-    get_job,
-    pool_info,
-)
-from app.services.challenge_ranker import load_candidates, rank_candidates
+from app.services.challenge_data import get_candidates_path, get_job, pool_info
+from app.services.challenge_ranker import load_candidates, rank_candidates, write_submission
+from app.services.rank_auditor import audit_ranking
 
 router = APIRouter()
 
@@ -27,6 +27,7 @@ class RankingResult(BaseModel):
     reasoning: str
     profile_summary: dict[str, Any]
     score_breakdown: dict[str, float] = {}
+    audit: dict[str, Any] = {}
 
 
 class RankingResponse(BaseModel):
@@ -34,6 +35,7 @@ class RankingResponse(BaseModel):
     pool: str
     pool_size: int
     ranked_count: int
+    quality_report: dict[str, Any]
     matches: list[RankingResult]
 
 
@@ -45,6 +47,7 @@ def _serialize_match(r) -> dict[str, Any]:
         "reasoning": r.reasoning,
         "profile_summary": r.profile_summary,
         "score_breakdown": r.score_breakdown,
+        "audit": r.audit,
     }
 
 
@@ -59,6 +62,7 @@ async def get_challenge_stats():
         "company": job["company"],
         "ranking_ready": pools["sample_available"] or pools["full_available"],
         "full_pool_available": pools["full_available"],
+        "ranker_version": "pro-v2-two-stage",
     }
 
 
@@ -68,11 +72,7 @@ async def get_challenge_job():
 
 
 @router.get("/candidates")
-async def list_challenge_candidates(
-    skip: int = 0,
-    limit: int = 50,
-    use_sample: bool = True,
-):
+async def list_challenge_candidates(skip: int = 0, limit: int = 50, use_sample: bool = True):
     try:
         path = get_candidates_path(use_sample=use_sample)
     except FileNotFoundError as exc:
@@ -80,7 +80,6 @@ async def list_challenge_candidates(
 
     candidates = load_candidates(path)
     page = candidates[skip : skip + limit]
-
     return {
         "pool": "sample" if use_sample else "full",
         "total": len(candidates),
@@ -108,7 +107,6 @@ async def get_challenge_candidate(candidate_id: str, use_sample: bool = True):
         path = get_candidates_path(use_sample=use_sample)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-
     for candidate in load_candidates(path):
         if candidate["candidate_id"] == candidate_id:
             return candidate
@@ -133,6 +131,7 @@ async def run_challenge_ranking(request: RankingRequest = RankingRequest()):
     top_n = min(request.top_n, len(candidates), 100)
     results = rank_candidates(candidates, job_description, top_n=top_n)
     matches = [_serialize_match(r) for r in results]
+    quality_report = audit_ranking(matches)
 
     payload = {
         "job": {
@@ -145,6 +144,7 @@ async def run_challenge_ranking(request: RankingRequest = RankingRequest()):
         "pool": "sample" if request.use_sample else "full",
         "pool_size": len(candidates),
         "ranked_count": len(matches),
+        "quality_report": quality_report,
         "matches": matches,
     }
     _ranking_cache = payload
@@ -154,12 +154,35 @@ async def run_challenge_ranking(request: RankingRequest = RankingRequest()):
 @router.get("/rankings")
 async def get_cached_rankings(limit: int = Query(default=100, le=100)):
     if not _ranking_cache:
-        raise HTTPException(
-            status_code=404,
-            detail="No rankings yet. POST /api/v1/challenge/rank first.",
-        )
+        raise HTTPException(status_code=404, detail="No rankings yet. POST /api/v1/challenge/rank first.")
     return {
         "job": _ranking_cache["job"],
         "pool": _ranking_cache["pool"],
+        "quality_report": _ranking_cache.get("quality_report"),
         "matches": _ranking_cache["matches"][:limit],
     }
+
+
+@router.get("/audit")
+async def get_audit_report():
+    if not _ranking_cache:
+        raise HTTPException(status_code=404, detail="Run ranking first.")
+    return audit_ranking(_ranking_cache["matches"])
+
+
+@router.get("/export-csv")
+async def export_submission_csv():
+    if not _ranking_cache or not _ranking_cache.get("matches"):
+        raise HTTPException(status_code=404, detail="Run ranking first.")
+
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["candidate_id", "rank", "score", "reasoning"])
+    for m in _ranking_cache["matches"]:
+        writer.writerow([m["candidate_id"], m["rank"], m["score"], m["reasoning"]])
+
+    return StreamingResponse(
+        iter([buf.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=submission.csv"},
+    )

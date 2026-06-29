@@ -35,4 +35,13 @@ export async function getRankings(limit = 100) {
   return data
 }
 
+export async function getAuditReport() {
+  const { data } = await api.get('/challenge/audit')
+  return data
+}
+
+export function getExportCsvUrl() {
+  return '/api/v1/challenge/export-csv'
+}
+
 export default api

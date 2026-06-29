@@ -1,11 +1,11 @@
 """
-CPU-only candidate ranker for the Redrob hackathon challenge.
+TalentLens Pro Ranker — two-stage CPU-only engine for Redrob hackathon.
 
-Designed per submission_spec + redrob_signals_doc:
-- Title/career history are decisive (not keyword stuffing)
-- Behavioral signals modify skill-match scores
-- Honeypot and trap profiles are penalized
-- No network calls during ranking
+Stage 1 (Recall): Fast TF-IDF + title filter on full pool (100K in ~30s)
+Stage 2 (Precision): Deep multi-signal scoring on top finalists
+Stage 3 (Audit): Cross-check, confidence, honeypot scan via rank_auditor.py
+
+No network calls. Designed to beat keyword-stuffing traps.
 """
 
 from __future__ import annotations
@@ -20,6 +20,10 @@ from typing import Any
 
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
+
+from app.services.rank_auditor import cross_check_candidate
+
+# ── JD-aligned skill & title lexicons ──────────────────────────────────────
 
 CORE_SKILLS = {
     "python", "embeddings", "retrieval", "ranking", "vector search", "faiss",
@@ -39,11 +43,18 @@ STRONG_TITLES = {
 WEAK_TITLES = {
     "marketing manager", "hr manager", "content writer", "graphic designer",
     "accountant", "mechanical engineer", "civil engineer", "business analyst",
+    "sales", "recruiter",
 }
 
 CONSULTING_FIRMS = {
     "tcs", "infosys", "wipro", "accenture", "cognizant", "capgemini", "mindtree",
     "hcl", "tech mahindra", "ltimindtree", "mphasis", "persistent", "lti",
+}
+
+PRODUCT_COMPANIES = {
+    "swiggy", "zomato", "razorpay", "flipkart", "amazon", "google", "microsoft",
+    "meta", "uber", "ola", "phonepe", "paytm", "freshworks", "zoho", "cred",
+    "meesho", "sharechat", "dream11", "redrob", "unacademy", "byju",
 }
 
 INDIA_LOCATIONS = {
@@ -59,13 +70,15 @@ CV_ONLY_SKILLS = {
 CAREER_IR_KEYWORDS = {
     "ranking", "retrieval", "recommendation", "search", "embedding", "vector",
     "semantic", "rag", "nlp", "ml model", "machine learning", "fine-tun",
-    "a/b test", "ndcg", "recsys", "re-rank",
+    "a/b test", "ndcg", "recsys", "re-rank", "two-tower", "learning to rank",
 }
 
 PRODUCT_INDICATORS = {
     "product", "startup", "series", "saas", "platform", "scale", "users",
-    "production", "deployed", "shipped", "a/b",
+    "production", "deployed", "shipped", "a/b", "million users",
 }
+
+RECALL_TOP_K = 2500  # Stage-1 shortlist size for 100K pool
 
 
 @dataclass
@@ -76,6 +89,7 @@ class RankedCandidate:
     reasoning: str
     profile_summary: dict[str, Any]
     score_breakdown: dict[str, float] = field(default_factory=dict)
+    audit: dict[str, Any] = field(default_factory=dict)
 
 
 def load_candidates(path: Path) -> list[dict[str, Any]]:
@@ -93,12 +107,9 @@ def _candidate_text(candidate: dict[str, Any]) -> str:
     parts: list[str] = []
     profile = candidate.get("profile", {})
     parts.extend([
-        profile.get("headline", ""),
-        profile.get("summary", ""),
-        profile.get("current_title", ""),
-        profile.get("current_company", ""),
-        profile.get("current_industry", ""),
-        profile.get("location", ""),
+        profile.get("headline", ""), profile.get("summary", ""),
+        profile.get("current_title", ""), profile.get("current_company", ""),
+        profile.get("current_industry", ""), profile.get("location", ""),
     ])
     for job in candidate.get("career_history", []):
         parts.extend([job.get("title", ""), job.get("company", ""), job.get("description", "")])
@@ -122,16 +133,28 @@ def _parse_date(value: str | None) -> date | None:
         return None
 
 
+def _fast_recall_score(candidate: dict[str, Any], semantic: float) -> float:
+    """Stage-1 lightweight score for 100K recall."""
+    profile = candidate.get("profile", {})
+    title = _title_score(profile.get("current_title", ""), profile.get("headline", ""))
+    hp = _honeypot_penalty(candidate)
+    if hp < 0.2:
+        return 0.0
+    return title * 0.45 + semantic * 0.35 + _career_relevance_score(candidate) * 0.20
+
+
 def _skill_trust_multiplier(candidate: dict[str, Any]) -> float:
     skills = candidate.get("skills", [])
     if not skills:
         return 0.5
     trusted = 0.0
+    stuffed = 0
     for skill in skills:
         endorsements = skill.get("endorsements", 0)
         duration = skill.get("duration_months", 0)
         proficiency = skill.get("proficiency", "beginner")
         if endorsements > 30 and duration < 6:
+            stuffed += 1
             continue
         if proficiency in ("advanced", "expert") and duration >= 12:
             trusted += 1.5
@@ -139,90 +162,105 @@ def _skill_trust_multiplier(candidate: dict[str, Any]) -> float:
             trusted += 1.0
         else:
             trusted += 0.5
-    return min(trusted / max(len(skills), 1), 1.0)
+    trust = min(trusted / max(len(skills) - stuffed, 1), 1.0)
+    if stuffed >= 3:
+        trust *= 0.7
+    return trust
 
 
-def _assessment_boost(signals: dict[str, Any], skills: set[str]) -> float:
+def _assessment_boost(signals: dict[str, Any]) -> float:
     assessments = signals.get("skill_assessment_scores") or {}
     if not assessments:
         return 0.5
-    relevant = []
-    for skill_name, score in assessments.items():
-        sl = skill_name.lower()
-        if any(c in sl for c in ("python", "ml", "nlp", "retriev", "rank", "embed", "search")):
-            relevant.append(score / 100.0)
+    relevant = [
+        score / 100.0 for name, score in assessments.items()
+        if any(c in name.lower() for c in ("python", "ml", "nlp", "retriev", "rank", "embed", "search"))
+    ]
     return sum(relevant) / len(relevant) if relevant else 0.5
 
 
 def _behavioral_multiplier(signals: dict[str, Any]) -> float:
     if not signals:
         return 0.7
-    multiplier = 1.0
+    m = 1.0
     if signals.get("open_to_work_flag"):
-        multiplier *= 1.05
-    response_rate = signals.get("recruiter_response_rate", 0)
-    if response_rate >= 0.5:
-        multiplier *= 1.08
-    elif response_rate < 0.15:
-        multiplier *= 0.82
+        m *= 1.06
+    rr = signals.get("recruiter_response_rate", 0)
+    if rr >= 0.5:
+        m *= 1.09
+    elif rr < 0.15:
+        m *= 0.80
     notice = signals.get("notice_period_days", 90)
     if notice <= 30:
-        multiplier *= 1.06
+        m *= 1.07
     elif notice > 90:
-        multiplier *= 0.9
-    saved = signals.get("saved_by_recruiters_30d", 0)
-    if saved >= 3:
-        multiplier *= 1.05
-    interview_rate = signals.get("interview_completion_rate", 0)
-    if interview_rate >= 0.8:
-        multiplier *= 1.03
-    elif interview_rate < 0.3:
-        multiplier *= 0.88
-    views = signals.get("profile_views_received_30d", 0)
-    if views >= 10:
-        multiplier *= 1.03
-    completeness = signals.get("profile_completeness_score", 50) / 100.0
-    multiplier *= 0.9 + 0.1 * completeness
-    last_active = _parse_date(signals.get("last_active_date"))
-    if last_active:
-        days_inactive = (date.today() - last_active).days
-        if days_inactive > 180:
-            multiplier *= 0.75
-        elif days_inactive > 90:
-            multiplier *= 0.88
-    github = signals.get("github_activity_score", -1)
-    if github >= 50:
-        multiplier *= 1.04
-    return min(max(multiplier, 0.55), 1.25)
+        m *= 0.88
+    if signals.get("saved_by_recruiters_30d", 0) >= 3:
+        m *= 1.05
+    icr = signals.get("interview_completion_rate", 0)
+    if icr >= 0.8:
+        m *= 1.04
+    elif icr < 0.3:
+        m *= 0.87
+    if signals.get("profile_views_received_30d", 0) >= 10:
+        m *= 1.03
+    m *= 0.88 + 0.12 * (signals.get("profile_completeness_score", 50) / 100.0)
+    last = _parse_date(signals.get("last_active_date"))
+    if last:
+        days = (date.today() - last).days
+        if days > 180:
+            m *= 0.72
+        elif days > 90:
+            m *= 0.86
+    gh = signals.get("github_activity_score", -1)
+    if gh >= 50:
+        m *= 1.05
+    return min(max(m, 0.50), 1.28)
 
 
 def _title_score(title: str, headline: str) -> float:
     combined = f"{title} {headline}".lower()
     for weak in WEAK_TITLES:
         if weak in combined:
-            return 0.15
+            return 0.12
     for strong in STRONG_TITLES:
         if strong in combined:
             return 1.0
     if any(kw in combined for kw in ("engineer", "scientist", "architect")):
-        return 0.75
-    return 0.45
+        return 0.72
+    return 0.40
 
 
 def _career_relevance_score(candidate: dict[str, Any]) -> float:
-    """Score career history for IR/ranking/production signals (JD hackathon note)."""
-    hits = 0
-    product_hits = 0
+    ir_hits = product_hits = product_co = 0
     for job in candidate.get("career_history", []):
-        desc = (job.get("description") or "").lower()
-        title = (job.get("title") or "").lower()
-        combined = f"{title} {desc}"
+        combined = f"{job.get('title', '')} {job.get('description', '')}".lower()
+        company = job.get("company", "").lower()
         if any(kw in combined for kw in CAREER_IR_KEYWORDS):
-            hits += 1
+            ir_hits += 1
         if any(kw in combined for kw in PRODUCT_INDICATORS):
             product_hits += 1
-    history_len = max(len(candidate.get("career_history", [])), 1)
-    return min((hits / history_len) * 0.6 + (product_hits / history_len) * 0.4, 1.0)
+        if any(pc in company for pc in PRODUCT_COMPANIES):
+            product_co += 1
+    n = max(len(candidate.get("career_history", [])), 1)
+    return min(ir_hits / n * 0.45 + product_hits / n * 0.30 + product_co / n * 0.25, 1.0)
+
+
+def _tenure_stability(candidate: dict[str, Any]) -> float:
+    history = candidate.get("career_history", [])
+    if len(history) < 2:
+        return 0.8
+    short = sum(1 for j in history if j.get("duration_months", 0) < 15)
+    return max(0.4, 1.0 - short / len(history) * 0.5)
+
+
+def _education_boost(candidate: dict[str, Any]) -> float:
+    tiers = [e.get("tier", "unknown") for e in candidate.get("education", [])]
+    if "tier_1" in tiers:
+        return 1.0
+    if "tier_2" in tiers:
+        return 0.9
+    return 0.75
 
 
 def _experience_score(years: float) -> float:
@@ -231,52 +269,45 @@ def _experience_score(years: float) -> float:
     if 4 <= years <= 12:
         return 0.85
     if 3 <= years <= 15:
-        return 0.65
-    return 0.35
+        return 0.62
+    return 0.30
 
 
 def _location_score(location: str, country: str) -> float:
     loc = f"{location} {country}".lower()
-    if any(city in loc for city in INDIA_LOCATIONS):
+    if any(c in loc for c in INDIA_LOCATIONS):
         return 1.0
     if country.lower() == "india":
-        return 0.9
-    return 0.45
+        return 0.88
+    return 0.40
 
 
 def _consulting_penalty(candidate: dict[str, Any]) -> float:
     companies = [candidate.get("profile", {}).get("current_company", "").lower()]
     companies.extend(j.get("company", "").lower() for j in candidate.get("career_history", []))
-    consulting_count = sum(1 for c in companies if any(firm in c for firm in CONSULTING_FIRMS))
-    total = max(len(companies), 1)
-    if consulting_count == total:
-        return 0.5
-    if consulting_count > total * 0.6:
-        return 0.72
+    cc = sum(1 for c in companies if any(f in c for f in CONSULTING_FIRMS))
+    n = max(len(companies), 1)
+    if cc == n:
+        return 0.45
+    if cc > n * 0.6:
+        return 0.68
     return 1.0
 
 
 def _cv_only_penalty(skills: set[str], text: str) -> float:
-    cv_hits = sum(1 for s in skills if any(cv in s for cv in CV_ONLY_SKILLS))
-    ir_hits = sum(
-        1 for s in skills
-        if any(k in s for k in ("nlp", "retrieval", "ranking", "search", "embedding", "llm", "rag"))
-    )
-    ir_in_career = any(kw in text for kw in CAREER_IR_KEYWORDS)
-    if cv_hits >= 3 and ir_hits == 0 and not ir_in_career:
-        return 0.45
+    cv = sum(1 for s in skills if any(c in s for c in CV_ONLY_SKILLS))
+    ir = sum(1 for s in skills if any(k in s for k in ("nlp", "retrieval", "ranking", "search", "embedding", "llm", "rag")))
+    if cv >= 3 and ir == 0 and not any(kw in text for kw in CAREER_IR_KEYWORDS):
+        return 0.40
     return 1.0
 
 
 def _langchain_trap_penalty(candidate: dict[str, Any], skills: set[str]) -> float:
-    """Penalize shallow LangChain-only AI profiles."""
     text = _candidate_text(candidate)
-    has_langchain = "langchain" in text or any("langchain" in s for s in skills)
-    has_deep_ml = any(
+    if ("langchain" in text or any("langchain" in s for s in skills)) and not any(
         k in text for k in ("pytorch", "tensorflow", "fine-tun", "embedding", "faiss", "ndcg", "retrieval")
-    )
-    if has_langchain and not has_deep_ml:
-        return 0.6
+    ):
+        return 0.55
     return 1.0
 
 
@@ -284,51 +315,98 @@ def _honeypot_penalty(candidate: dict[str, Any]) -> float:
     profile = candidate.get("profile", {})
     years = profile.get("years_of_experience", 0)
     history = candidate.get("career_history", [])
-    total_months = sum(j.get("duration_months", 0) for j in history)
-    if years > 0 and total_months > 0:
-        expected_months = years * 12
-        if total_months > expected_months * 2.5 or total_months < expected_months * 0.3:
-            return 0.05
-    signals = candidate.get("redrob_signals", {})
-    if signals.get("notice_period_days", 0) > 180:
-        return 0.05
+    months = sum(j.get("duration_months", 0) for j in history)
+    if years > 0 and months > 0:
+        exp = years * 12
+        if months > exp * 2.5 or months < exp * 0.25:
+            return 0.03
+    if candidate.get("redrob_signals", {}).get("notice_period_days", 0) > 180:
+        return 0.03
     return 1.0
 
 
 def _core_skill_score(skills: set[str], text: str) -> float:
-    matched = {core for core in CORE_SKILLS if core in skills or core in text}
-    return min(len(matched) / 8, 1.0)
+    matched = {c for c in CORE_SKILLS if c in skills or c in text}
+    return min(len(matched) / 7, 1.0)
 
 
-def _generate_reasoning(candidate: dict[str, Any], breakdown: dict[str, float]) -> str:
+def _deep_score(
+    candidate: dict[str, Any],
+    text: str,
+    semantic: float,
+) -> tuple[float, dict[str, float]]:
+    profile = candidate.get("profile", {})
+    skills = _skill_names(candidate)
+    signals = candidate.get("redrob_signals", {})
+
+    skill_raw = _core_skill_score(skills, text) * _skill_trust_multiplier(candidate)
+    skill_component = skill_raw * 0.65 + _assessment_boost(signals) * 0.35
+    title_component = _title_score(profile.get("current_title", ""), profile.get("headline", ""))
+    career_component = _career_relevance_score(candidate)
+    exp_component = _experience_score(profile.get("years_of_experience", 0))
+    loc_component = _location_score(profile.get("location", ""), profile.get("country", ""))
+    tenure_component = _tenure_stability(candidate)
+    edu_component = _education_boost(candidate)
+
+    base = (
+        title_component * 0.30
+        + career_component * 0.24
+        + skill_component * 0.18
+        + exp_component * 0.10
+        + loc_component * 0.08
+        + semantic * 0.06
+        + tenure_component * 0.02
+        + edu_component * 0.02
+    )
+
+    behavioral = _behavioral_multiplier(signals)
+    penalties = (
+        _consulting_penalty(candidate)
+        * _cv_only_penalty(skills, text)
+        * _langchain_trap_penalty(candidate, skills)
+        * _honeypot_penalty(candidate)
+    )
+    final = base * behavioral * penalties
+
+    breakdown = {
+        "skills": round(skill_component, 3),
+        "title": round(title_component, 3),
+        "career": round(career_component, 3),
+        "experience": round(exp_component, 3),
+        "location": round(loc_component, 3),
+        "semantic": round(semantic, 3),
+        "tenure": round(tenure_component, 3),
+        "education": round(edu_component, 3),
+        "behavioral": round(behavioral, 3),
+        "penalties": round(penalties, 3),
+        "final": round(final, 3),
+    }
+    return final, breakdown
+
+
+def _generate_reasoning(candidate: dict[str, Any], breakdown: dict[str, float], audit: dict[str, Any]) -> str:
     profile = candidate.get("profile", {})
     signals = candidate.get("redrob_signals", {})
     skills = _skill_names(candidate)
-    core_matched = [
-        s for s in sorted(skills)
-        if any(c in s for c in ("python", "embed", "retriev", "rank", "llm", "vector", "faiss", "nlp", "rag"))
-    ]
-    title = profile.get("current_title", "Professional")
-    years = profile.get("years_of_experience", 0)
-    location = profile.get("location", "unknown")
-    company = profile.get("current_company", "")
-    notice = signals.get("notice_period_days")
-    response = signals.get("recruiter_response_rate")
+    core = [s for s in sorted(skills) if any(c in s for c in ("python", "embed", "retriev", "rank", "llm", "vector", "faiss", "nlp", "rag"))]
 
-    parts = [f"{title} at {company} with {years:.1f} yrs"]
-    if breakdown.get("career", 0) >= 0.5:
-        parts.append("career history shows ranking/retrieval/production work")
-    if core_matched:
-        parts.append(f"skills include {', '.join(core_matched[:3])}")
-    parts.append(f"based in {location}")
-    if isinstance(response, (int, float)):
-        parts.append(f"response rate {response:.2f}")
+    parts = [
+        f"{profile.get('current_title', 'Professional')} at {profile.get('current_company', 'N/A')} "
+        f"with {profile.get('years_of_experience', 0):.1f} yrs",
+    ]
+    if breakdown.get("career", 0) >= 0.45:
+        parts.append("shipped ranking/retrieval/production systems in career history")
+    if core:
+        parts.append(f"{len(core)} core AI/IR skills including {', '.join(core[:3])}")
+    parts.append(f"based in {profile.get('location', 'unknown')}")
+    rr = signals.get("recruiter_response_rate")
+    if isinstance(rr, (int, float)):
+        parts.append(f"response rate {rr:.2f}")
+    notice = signals.get("notice_period_days")
     if isinstance(notice, int) and notice > 60:
-        parts.append(f"notice period {notice} days is a concern")
-    if breakdown.get("title", 1) < 0.3:
-        parts.append("title mismatch for Senior AI Engineer role")
-    if breakdown.get("behavioral", 1) < 0.85:
-        parts.append("low engagement signals")
+        parts.append(f"notice {notice}d is a concern")
+    if audit.get("fit_tier") == "Strong Fit":
+        parts.append("high cross-check confidence")
     return "; ".join(parts) + "."
 
 
@@ -341,71 +419,53 @@ def rank_candidates(
         return []
 
     texts = [_candidate_text(c) for c in candidates]
-    vectorizer = TfidfVectorizer(max_features=10000, ngram_range=(1, 2), stop_words="english")
-    tfidf_matrix = vectorizer.fit_transform(texts + [job_description.lower()])
-    semantic_scores = cosine_similarity(tfidf_matrix[:-1], tfidf_matrix[-1]).flatten()
+    vectorizer = TfidfVectorizer(max_features=12000, ngram_range=(1, 2), stop_words="english", sublinear_tf=True)
+    tfidf = vectorizer.fit_transform(texts + [job_description.lower()])
+    semantics = cosine_similarity(tfidf[:-1], tfidf[-1]).flatten()
 
-    scored: list[tuple[str, float, dict[str, Any], dict[str, float]]] = []
+    # ── Stage 1: recall shortlist for large pools ──────────────────────────
+    if len(candidates) > 500:
+        recall_scored = [
+            (i, _fast_recall_score(candidates[i], float(semantics[i])))
+            for i in range(len(candidates))
+        ]
+        recall_scored.sort(key=lambda x: -x[1])
+        shortlist_idx = [i for i, s in recall_scored[:RECALL_TOP_K] if s > 0]
+    else:
+        shortlist_idx = list(range(len(candidates)))
 
-    for idx, candidate in enumerate(candidates):
-        profile = candidate.get("profile", {})
-        skills = _skill_names(candidate)
-        text = texts[idx]
-        signals = candidate.get("redrob_signals", {})
-
-        skill_raw = _core_skill_score(skills, text) * _skill_trust_multiplier(candidate)
-        assessment = _assessment_boost(signals, skills)
-        skill_component = skill_raw * 0.7 + assessment * 0.3
-
-        title_component = _title_score(profile.get("current_title", ""), profile.get("headline", ""))
-        career_component = _career_relevance_score(candidate)
-        exp_component = _experience_score(profile.get("years_of_experience", 0))
-        loc_component = _location_score(profile.get("location", ""), profile.get("country", ""))
-        semantic_component = float(semantic_scores[idx])
-
-        base = (
-            skill_component * 0.22
-            + title_component * 0.28
-            + career_component * 0.20
-            + exp_component * 0.12
-            + loc_component * 0.08
-            + semantic_component * 0.10
-        )
-
-        behavioral = _behavioral_multiplier(signals)
-        penalties = (
-            _consulting_penalty(candidate)
-            * _cv_only_penalty(skills, text)
-            * _langchain_trap_penalty(candidate, skills)
-            * _honeypot_penalty(candidate)
-        )
-        final_score = base * behavioral * penalties
-
-        breakdown = {
-            "skills": round(skill_component, 3),
-            "title": round(title_component, 3),
-            "career": round(career_component, 3),
-            "experience": round(exp_component, 3),
-            "location": round(loc_component, 3),
-            "semantic": round(semantic_component, 3),
-            "behavioral": round(behavioral, 3),
-            "penalties": round(penalties, 3),
-            "final": round(final_score, 3),
-        }
-        scored.append((candidate["candidate_id"], final_score, candidate, breakdown))
+    # ── Stage 2: deep precision scoring ──────────────────────────────────
+    scored: list[tuple[str, float, dict, dict, dict]] = []
+    for idx in shortlist_idx:
+        c = candidates[idx]
+        final, breakdown = _deep_score(c, texts[idx], float(semantics[idx]))
+        audit = cross_check_candidate(c, breakdown)
+        if audit.get("fit_tier") == "Concern" and breakdown.get("penalties", 1) < 0.15:
+            continue
+        scored.append((c["candidate_id"], final, c, breakdown, audit))
 
     scored.sort(key=lambda x: (-x[1], x[0]))
-    top = scored[:top_n]
+
+    # ── Stage 3: iterative re-rank — demote flagged traps in top band ─────
+    clean: list[tuple] = []
+    demoted: list[tuple] = []
+    for item in scored:
+        if item[4].get("audit_flags") and "KEYWORD_STUFFER_TRAP" in item[4]["audit_flags"]:
+            demoted.append(item)
+        else:
+            clean.append(item)
+    final_order = clean + demoted
+    top = final_order[:top_n]
 
     results: list[RankedCandidate] = []
-    for rank_idx, (cid, raw_score, candidate, breakdown) in enumerate(top, start=1):
+    for rank_idx, (cid, raw, candidate, breakdown, audit) in enumerate(top, start=1):
         normalized = max(0.01, round(1.0 - (rank_idx - 1) * 0.008, 4))
         profile = candidate.get("profile", {})
         results.append(RankedCandidate(
             candidate_id=cid,
             rank=rank_idx,
             score=normalized,
-            reasoning=_generate_reasoning(candidate, breakdown),
+            reasoning=_generate_reasoning(candidate, breakdown, audit),
             profile_summary={
                 "name": profile.get("anonymized_name"),
                 "title": profile.get("current_title"),
@@ -419,6 +479,7 @@ def rank_candidates(
                 "notice_period_days": candidate.get("redrob_signals", {}).get("notice_period_days"),
             },
             score_breakdown=breakdown,
+            audit=audit,
         ))
 
     return results

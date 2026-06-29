@@ -215,3 +215,20 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Environment secrets (never commit)
+.env
+
+# Redrob challenge bundle — keep locally, extract via scripts/extract_challenge_data.py
+\[PUB\] India_runs_data_and_ai_challenge/
+\[PUB\] India_runs_data_and_ai_challenge.zip
+__MACOSX/
+
+# Large candidate pool (extract from zip into data/ locally)
+data/candidates.jsonl
+data/candidates.jsonl.gz
+
+# Generated outputs
+data/submission.csv
+*.csv
+!data/sample_submission.csv
