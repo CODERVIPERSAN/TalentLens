@@ -1,19 +1,34 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useCallback } from 'react'
 import { Search, Loader2 } from 'lucide-react'
-import { getCandidates } from '../api/client'
+import { getCandidates, getStats } from '../api/client'
+import PoolSelector from '../components/PoolSelector'
 
 export default function Candidates() {
-  const [data, setData] = useState({ candidates: [], total: 0, pool: 'sample' })
+  const [data, setData] = useState({ candidates: [], total: 0, pool: 'full' })
+  const [stats, setStats] = useState(null)
+  const [useSample, setUseSample] = useState(false)
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
   const [error, setError] = useState(null)
 
-  useEffect(() => {
-    getCandidates(0, 50, true)
+  const loadCandidates = useCallback(() => {
+    setLoading(true)
+    getCandidates(0, 50, useSample)
       .then(setData)
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false))
+  }, [useSample])
+
+  useEffect(() => {
+    getStats().then((s) => {
+      setStats(s)
+      setUseSample(s.default_pool === 'sample')
+    }).catch(() => {})
   }, [])
+
+  useEffect(() => {
+    loadCandidates()
+  }, [loadCandidates])
 
   const filtered = data.candidates.filter((c) => {
     const q = search.toLowerCase()
@@ -27,14 +42,23 @@ export default function Candidates() {
 
   return (
     <div>
-      <div className="flex justify-between items-center mb-8">
+      <div className="flex justify-between items-center mb-4">
         <div>
           <h2 className="text-3xl font-bold text-gray-900">Candidates</h2>
           <p className="text-gray-500 text-sm mt-1">
-            {data.total} candidates from PUB challenge ({data.pool} pool)
+            {data.total?.toLocaleString()} candidates ({data.pool} pool)
           </p>
+          {data.source_file && (
+            <p className="text-xs text-gray-400 mt-1 font-mono">{data.source_file}</p>
+          )}
         </div>
       </div>
+
+      {stats && (
+        <div className="mb-4">
+          <PoolSelector useSample={useSample} onChange={setUseSample} stats={stats} />
+        </div>
+      )}
 
       {error && (
         <div className="mb-4 p-4 bg-red-50 border border-red-200 rounded-lg text-red-700">{error}</div>
@@ -57,7 +81,7 @@ export default function Candidates() {
         {loading ? (
           <div className="p-8 flex justify-center text-gray-500">
             <Loader2 className="w-6 h-6 animate-spin mr-2" />
-            Loading candidates from challenge JSON...
+            Loading from {useSample ? 'sample_candidates.json' : 'candidates.jsonl'}...
           </div>
         ) : (
           <div className="overflow-x-auto">

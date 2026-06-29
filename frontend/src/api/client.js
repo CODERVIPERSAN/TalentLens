@@ -15,14 +15,14 @@ export async function getJob() {
   return data
 }
 
-export async function getCandidates(skip = 0, limit = 50, useSample = true) {
+export async function getCandidates(skip = 0, limit = 50, useSample = false) {
   const { data } = await api.get('/challenge/candidates', {
     params: { skip, limit, use_sample: useSample },
   })
   return data
 }
 
-export async function runRanking(topN = 50, useSample = true) {
+export async function runRanking(topN = 100, useSample = false) {
   const { data } = await api.post('/challenge/rank', {
     use_sample: useSample,
     top_n: topN,

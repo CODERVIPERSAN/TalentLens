@@ -1,15 +1,42 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useRef } from 'react'
 import {
   Search, Brain, TrendingUp, Loader2, Briefcase, MapPin,
-  ChevronDown, ChevronUp, Shield, Download, AlertTriangle, CheckCircle,
+  ChevronDown, ChevronUp, Shield, Download, AlertTriangle, CheckCircle, Timer,
 } from 'lucide-react'
-import { getJob, runRanking, getExportCsvUrl } from '../api/client'
+import { getJob, runRanking, getExportCsvUrl, getStats } from '../api/client'
+import PoolSelector from '../components/PoolSelector'
 
 const FIT_STYLES = {
   'Strong Fit': 'bg-emerald-100 text-emerald-800 border-emerald-200',
   'Good Fit': 'bg-blue-100 text-blue-800 border-blue-200',
   'Borderline': 'bg-amber-100 text-amber-800 border-amber-200',
   'Concern': 'bg-red-100 text-red-800 border-red-200',
+}
+
+function formatDuration(ms) {
+  if (ms == null || ms < 0) return '—'
+  const totalSec = ms / 1000
+  if (totalSec < 60) return `${totalSec.toFixed(1)}s`
+  const min = Math.floor(totalSec / 60)
+  const sec = (totalSec % 60).toFixed(1)
+  return `${min}m ${sec}s`
+}
+
+function RunTimer({ elapsedMs, running, lastRunMs }) {
+  if (!running && lastRunMs == null) return null
+
+  return (
+    <div className={`flex items-center gap-2 px-4 py-2 rounded-lg border text-sm font-mono ${
+      running ? 'bg-amber-50 border-amber-200 text-amber-800' : 'bg-emerald-50 border-emerald-200 text-emerald-800'
+    }`}>
+      <Timer className={`w-4 h-4 ${running ? 'animate-pulse' : ''}`} />
+      {running ? (
+        <span>Running: <strong>{formatDuration(elapsedMs)}</strong></span>
+      ) : (
+        <span>Completed in <strong>{formatDuration(lastRunMs)}</strong></span>
+      )}
+    </div>
+  )
 }
 
 function ScoreBar({ label, value, max = 1 }) {
@@ -163,22 +190,54 @@ export default function Matches() {
   const [hasRun, setHasRun] = useState(false)
   const [search, setSearch] = useState('')
   const [error, setError] = useState(null)
+  const [useSample, setUseSample] = useState(false)
+  const [stats, setStats] = useState(null)
+  const [elapsedMs, setElapsedMs] = useState(0)
+  const [lastRunMs, setLastRunMs] = useState(null)
+  const startTimeRef = useRef(null)
 
   useEffect(() => {
     getJob().then(setJob).catch(() => {}).finally(() => setJobLoading(false))
+    getStats().then((data) => {
+      setStats(data)
+      setUseSample(data.default_pool === 'sample')
+    }).catch(() => {})
   }, [])
+
+  useEffect(() => {
+    if (!loading) return undefined
+
+    startTimeRef.current = performance.now()
+    setElapsedMs(0)
+
+    const interval = setInterval(() => {
+      setElapsedMs(performance.now() - startTimeRef.current)
+    }, 100)
+
+    return () => clearInterval(interval)
+  }, [loading])
 
   const handleRunRanking = async () => {
     setLoading(true)
     setError(null)
+    setLastRunMs(null)
+    const t0 = performance.now()
     try {
-      const result = await runRanking(50, true)
+      const result = await runRanking(100, useSample)
+      const duration = performance.now() - t0
+      setLastRunMs(duration)
       setJob(result.job)
       setMatches(result.matches)
       setQualityReport(result.quality_report)
-      setPoolInfo({ pool: result.pool, pool_size: result.pool_size, ranked_count: result.ranked_count })
+      setPoolInfo({
+        pool: result.pool,
+        pool_size: result.pool_size,
+        ranked_count: result.ranked_count,
+        duration_ms: duration,
+      })
       setHasRun(true)
     } catch (err) {
+      setLastRunMs(performance.now() - t0)
       setError(err.response?.data?.detail || err.message)
     } finally {
       setLoading(false)
@@ -203,7 +262,8 @@ export default function Matches() {
           <h2 className="text-3xl font-bold text-gray-900">Matches</h2>
           <p className="text-gray-500 text-sm mt-1">Pro ranker with cross-check audit & confidence scoring</p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex gap-2 items-center">
+          <RunTimer elapsedMs={elapsedMs} running={loading} lastRunMs={lastRunMs} />
           {hasRun && (
             <a
               href={getExportCsvUrl()}
@@ -228,6 +288,17 @@ export default function Matches() {
         <div className="mb-4 p-4 bg-red-50 border border-red-200 rounded-lg text-red-700">{error}</div>
       )}
 
+      {stats && (
+        <div className="mb-4">
+          <PoolSelector useSample={useSample} onChange={setUseSample} stats={stats} />
+          {!useSample && (
+            <p className="text-xs text-amber-600 mt-2">
+              Full pool ranking may take 1–3 minutes on CPU. Sample pool is instant (~2 sec).
+            </p>
+          )}
+        </div>
+      )}
+
       {!jobLoading && job && (
         <div className="bg-white rounded-lg shadow p-5 mb-6 border-l-4 border-indigo-500">
           <div className="flex items-center gap-2 mb-2">
@@ -242,6 +313,11 @@ export default function Matches() {
           {poolInfo && (
             <p className="mt-2 text-sm text-indigo-600">
               Ranked {poolInfo.ranked_count} of {poolInfo.pool_size} ({poolInfo.pool} pool) · 3-stage pipeline
+              {poolInfo.duration_ms != null && (
+                <span className="ml-2 text-emerald-700 font-medium">
+                  · {formatDuration(poolInfo.duration_ms)}
+                </span>
+              )}
             </p>
           )}
         </div>
@@ -259,6 +335,20 @@ export default function Matches() {
           Beats keyword stuffers by prioritizing career proof over skill lists.
         </p>
       </div>
+
+      {loading && (
+        <div className="mb-4 p-4 bg-amber-50 border border-amber-200 rounded-lg flex items-center justify-between">
+          <div className="flex items-center text-amber-800">
+            <Loader2 className="w-5 h-5 mr-2 animate-spin" />
+            <span>
+              Ranking {useSample ? '50 sample' : '100,000 full'} candidates on CPU…
+            </span>
+          </div>
+          <span className="font-mono text-lg font-semibold text-amber-900">
+            {formatDuration(elapsedMs)}
+          </span>
+        </div>
+      )}
 
       {hasRun && <QualityReport report={qualityReport} />}
 

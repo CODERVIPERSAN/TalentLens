@@ -6,7 +6,12 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from app.services.challenge_data import get_candidates_path, get_job, pool_info
+from app.services.challenge_data import (
+    get_candidates_path,
+    get_data_sources,
+    get_job,
+    load_candidates_page,
+)
 from app.services.challenge_ranker import load_candidates, rank_candidates, write_submission
 from app.services.rank_auditor import audit_ranking
 
@@ -16,8 +21,8 @@ _ranking_cache: dict[str, Any] | None = None
 
 
 class RankingRequest(BaseModel):
-    use_sample: bool = True
-    top_n: int = Field(default=50, ge=1, le=100)
+    use_sample: bool = False
+    top_n: int = Field(default=100, ge=1, le=100)
 
 
 class RankingResult(BaseModel):
@@ -54,14 +59,17 @@ def _serialize_match(r) -> dict[str, Any]:
 @router.get("/stats")
 async def get_challenge_stats():
     job = get_job()
-    pools = pool_info()
+    meta = get_data_sources()
     return {
-        "sample_candidates": pools["sample_count"],
-        "full_pool_size": pools["full_count"] or 100000,
+        "sample_candidates": meta["sample_count"],
+        "full_pool_size": meta["full_count"] or 100000,
         "job_title": job["title"],
         "company": job["company"],
-        "ranking_ready": pools["sample_available"] or pools["full_available"],
-        "full_pool_available": pools["full_available"],
+        "ranking_ready": meta["sample_available"] or meta["full_available"],
+        "full_pool_available": meta["full_available"],
+        "default_pool": meta["default_pool"],
+        "active_ranker_file": meta["active_ranker_file"],
+        "sources": meta["sources"],
         "ranker_version": "pro-v2-two-stage",
     }
 
@@ -72,17 +80,17 @@ async def get_challenge_job():
 
 
 @router.get("/candidates")
-async def list_challenge_candidates(skip: int = 0, limit: int = 50, use_sample: bool = True):
+async def list_challenge_candidates(skip: int = 0, limit: int = 50, use_sample: bool = False):
     try:
         path = get_candidates_path(use_sample=use_sample)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    candidates = load_candidates(path)
-    page = candidates[skip : skip + limit]
+    page, total = load_candidates_page(path, skip, limit)
     return {
         "pool": "sample" if use_sample else "full",
-        "total": len(candidates),
+        "total": total,
+        "source_file": str(path),
         "candidates": [
             {
                 "candidate_id": c["candidate_id"],
@@ -143,6 +151,7 @@ async def run_challenge_ranking(request: RankingRequest = RankingRequest()):
         },
         "pool": "sample" if request.use_sample else "full",
         "pool_size": len(candidates),
+        "source_file": str(path),
         "ranked_count": len(matches),
         "quality_report": quality_report,
         "matches": matches,
