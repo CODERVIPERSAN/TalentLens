@@ -3,7 +3,7 @@ import {
   Search, Brain, TrendingUp, Loader2, Briefcase, MapPin,
   ChevronDown, ChevronUp, Shield, Download, AlertTriangle, CheckCircle, Timer,
 } from 'lucide-react'
-import { getJob, runRanking, getExportCsvUrl, getStats } from '../api/client'
+import { getJob, runRanking, generateMatchReasoning, getExportCsvUrl, getStats } from '../api/client'
 import PoolSelector from '../components/PoolSelector'
 
 const FIT_STYLES = {
@@ -108,12 +108,14 @@ function QualityReport({ report }) {
   )
 }
 
-function MatchCard({ match }) {
+function MatchCard({ match, ollamaAvailable, generating, reasoningBusy, onGenerateReasoning }) {
   const [expanded, setExpanded] = useState(false)
   const profile = match.profile_summary || {}
   const breakdown = match.score_breakdown || {}
   const audit = match.audit || {}
   const fitStyle = FIT_STYLES[audit.fit_tier] || FIT_STYLES['Borderline']
+  const isOllama = match.reasoning_source === 'ollama'
+  const showGenerate = ollamaAvailable && onGenerateReasoning
 
   return (
     <div className="p-6 hover:bg-gray-50">
@@ -130,14 +132,17 @@ function MatchCard({ match }) {
               {audit.fit_tier || '—'}
             </span>
             <span className="text-xs text-gray-500">{audit.confidence}% conf.</span>
+            {isOllama && (
+              <span className="text-xs px-2 py-0.5 bg-purple-100 text-purple-700 border border-purple-200 rounded">
+                Llama
+              </span>
+            )}
           </div>
 
           <p className="text-sm text-gray-500 mb-2">
             {profile.company} · {profile.location} · {profile.years_of_experience?.toFixed?.(1)} yrs
             {profile.response_rate != null && ` · RR ${(profile.response_rate * 100).toFixed(0)}%`}
           </p>
-
-          <p className="text-gray-700 text-sm mb-3">{match.reasoning}</p>
 
           {audit.audit_flags?.length > 0 && (
             <div className="flex flex-wrap gap-1 mb-3">
@@ -162,16 +167,59 @@ function MatchCard({ match }) {
             className="flex items-center text-xs text-indigo-600 hover:text-indigo-800"
           >
             {expanded ? <ChevronUp className="w-4 h-4 mr-1" /> : <ChevronDown className="w-4 h-4 mr-1" />}
-            {expanded ? 'Hide' : 'Show'} score breakdown
+            {expanded ? 'Hide' : 'Show'} reasoning & score breakdown
           </button>
 
           {expanded && (
-            <div className="mt-3 p-3 bg-gray-50 rounded-lg space-y-1.5">
-              {['skills', 'title', 'career', 'experience', 'location', 'semantic', 'tenure', 'education', 'behavioral', 'penalties']
-                .filter((key) => breakdown[key] != null)
-                .map((key) => (
-                  <ScoreBar key={key} label={key} value={breakdown[key]} />
-                ))}
+            <div className="mt-3 p-3 bg-gray-50 rounded-lg space-y-4">
+              <div>
+                <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">
+                    Ranking reasoning
+                    {isOllama && (
+                      <span className="ml-2 normal-case font-normal text-purple-600">· Ollama Llama 3.2</span>
+                    )}
+                  </p>
+                  {showGenerate && (
+                    <button
+                      type="button"
+                      onClick={() => onGenerateReasoning(match.candidate_id)}
+                      disabled={reasoningBusy}
+                      className="flex items-center text-xs px-2 py-1 rounded border border-purple-200 text-purple-700 bg-purple-50 hover:bg-purple-100 disabled:opacity-50"
+                    >
+                      {generating ? (
+                        <>
+                          <Loader2 className="w-3 h-3 mr-1 animate-spin" />
+                          Generating…
+                        </>
+                      ) : (
+                        <>
+                          <Brain className="w-3 h-3 mr-1" />
+                          {isOllama ? 'Regenerate with Llama' : 'Generate detailed reasoning (Llama)'}
+                        </>
+                      )}
+                    </button>
+                  )}
+                </div>
+                <p className="text-sm text-gray-700 leading-relaxed">{match.reasoning}</p>
+                {!isOllama && ollamaAvailable && (
+                  <p className="text-xs text-gray-500 mt-2">
+                    Rule-based summary — click Generate for Llama detailed reasoning (~3–5s).
+                  </p>
+                )}
+              </div>
+              {Object.keys(breakdown).length > 0 && (
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-wide text-gray-500 mb-2">Score breakdown</p>
+                  <div className="space-y-1.5">
+                    {['skills', 'title', 'career', 'experience', 'location', 'semantic', 'tenure', 'education', 'behavioral', 'penalties']
+                      .filter((key) => breakdown[key] != null)
+                      .map((key) => (
+                        <ScoreBar key={key} label={key} value={breakdown[key]} />
+                      ))}
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -195,6 +243,8 @@ export default function Matches() {
   const [stats, setStats] = useState(null)
   const [elapsedMs, setElapsedMs] = useState(0)
   const [lastRunMs, setLastRunMs] = useState(null)
+  const [ollamaInfo, setOllamaInfo] = useState(null)
+  const [generatingReasoningId, setGeneratingReasoningId] = useState(null)
   const startTimeRef = useRef(null)
 
   useEffect(() => {
@@ -225,12 +275,13 @@ export default function Matches() {
     setLastRunMs(null)
     const t0 = performance.now()
     try {
-      const result = await runRanking(100, useSample)
+      const result = await runRanking(100, useSample, { useOllama: true, ollamaTopN: 10 })
       const duration = performance.now() - t0
       setLastRunMs(duration)
       setJob(result.job)
       setMatches(result.matches)
       setQualityReport(result.quality_report)
+      setOllamaInfo(result.ollama_reasoning || null)
       setMemoryWarning(result.memory_warning || null)
       setPoolInfo({
         pool: result.pool,
@@ -245,6 +296,25 @@ export default function Matches() {
       setError(err.response?.data?.detail || err.message)
     } finally {
       setLoading(false)
+    }
+  }
+
+  const handleGenerateReasoning = async (candidateId) => {
+    setGeneratingReasoningId(candidateId)
+    setError(null)
+    try {
+      const updated = await generateMatchReasoning(candidateId)
+      setMatches((prev) =>
+        prev.map((m) =>
+          m.candidate_id === candidateId
+            ? { ...m, reasoning: updated.reasoning, reasoning_source: updated.reasoning_source }
+            : m
+        )
+      )
+    } catch (err) {
+      setError(err.response?.data?.detail || err.message)
+    } finally {
+      setGeneratingReasoningId(null)
     }
   }
 
@@ -301,7 +371,12 @@ export default function Matches() {
           <PoolSelector useSample={useSample} onChange={setUseSample} stats={stats} />
           {!useSample && (
             <p className="text-xs text-amber-600 mt-2">
-              Full pool uses streaming ranker (~1 min, ~300MB RAM). Close extra browser tabs if the system feels slow.
+              Full pool: rank ~1 min + Llama reasoning for top 10 (~30s). Ranks 11–100: generate on demand per candidate.
+            </p>
+          )}
+          {stats?.ollama_available === false && (
+            <p className="text-xs text-red-600 mt-2">
+              Ollama not running — start with <code className="bg-gray-100 px-1">ollama serve</code> for Llama reasoning.
             </p>
           )}
         </div>
@@ -331,6 +406,11 @@ export default function Matches() {
                   Saved to <code className="bg-gray-100 px-1 rounded">{poolInfo.submission_file}</code>
                 </span>
               )}
+              {ollamaInfo?.enabled && (
+                <span className="block mt-1 text-xs text-purple-700">
+                  Ollama ({ollamaInfo.model}): {ollamaInfo.enriched} enriched, {ollamaInfo.fallback} rule-based fallbacks (top {ollamaInfo.top_n})
+                </span>
+              )}
             </p>
           )}
         </div>
@@ -344,7 +424,8 @@ export default function Matches() {
         <p className="text-gray-600 text-sm">
           <strong>Stage 1 Recall</strong> → TF-IDF shortlist (2,500 from 100K) ·
           <strong> Stage 2 Precision</strong> → title/career/skills/behavioral deep score ·
-          <strong> Stage 3 Audit</strong> → cross-check confidence, honeypot scan, trap demotion.
+          <strong> Stage 3 Audit</strong> → cross-check confidence, honeypot scan, trap demotion ·
+          <strong> Stage 4 Reasoning</strong> → Llama 3.2 auto for top 10; click Generate on any match for on-demand reasoning.
           Beats keyword stuffers by prioritizing career proof over skill lists.
         </p>
       </div>
@@ -354,7 +435,7 @@ export default function Matches() {
           <div className="flex items-center text-amber-800">
             <Loader2 className="w-5 h-5 mr-2 animate-spin" />
             <span>
-              Ranking {useSample ? '50 sample' : '100,000 full'} candidates on CPU…
+              Ranking {useSample ? '50 sample' : '100,000 full'} + Llama top-10 reasoning…
             </span>
           </div>
           <span className="font-mono text-lg font-semibold text-amber-900">
@@ -382,7 +463,14 @@ export default function Matches() {
           </div>
           <div className="divide-y divide-gray-200">
             {filtered.map((match) => (
-              <MatchCard key={match.candidate_id} match={match} />
+              <MatchCard
+                key={match.candidate_id}
+                match={match}
+                ollamaAvailable={stats?.ollama_available !== false}
+                generating={generatingReasoningId === match.candidate_id}
+                reasoningBusy={generatingReasoningId != null}
+                onGenerateReasoning={hasRun ? handleGenerateReasoning : null}
+              />
             ))}
           </div>
         </div>
