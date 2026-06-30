@@ -126,7 +126,7 @@ export default function Dashboard() {
           </div>
           <div className="p-4 bg-blue-50 rounded-lg">
             <h4 className="font-medium text-blue-900 mb-2">Matches</h4>
-            <p className="text-sm text-blue-700">Run ranker on same pool you select in Matches page</p>
+            <p className="text-sm text-blue-700">Run ranker + Ollama Llama reasoning (top 50) on Matches page</p>
           </div>
         </div>
       </div>
