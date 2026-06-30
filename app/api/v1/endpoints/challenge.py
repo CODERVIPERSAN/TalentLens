@@ -1,5 +1,6 @@
 import csv
 import io
+import time
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
@@ -40,6 +41,7 @@ class RankingResponse(BaseModel):
     pool: str
     pool_size: int
     ranked_count: int
+    runtime_ms: int = 0
     quality_report: dict[str, Any]
     matches: list[RankingResult]
 
@@ -70,7 +72,7 @@ async def get_challenge_stats():
         "default_pool": meta["default_pool"],
         "active_ranker_file": meta["active_ranker_file"],
         "sources": meta["sources"],
-        "ranker_version": "pro-v2-two-stage",
+        "ranker_version": "pro-v4-hybrid-ltr",
     }
 
 
@@ -137,7 +139,9 @@ async def run_challenge_ranking(request: RankingRequest = RankingRequest()):
 
     candidates = load_candidates(path)
     top_n = min(request.top_n, len(candidates), 100)
+    t0 = time.perf_counter()
     results = rank_candidates(candidates, job_description, top_n=top_n)
+    runtime_ms = round((time.perf_counter() - t0) * 1000)
     matches = [_serialize_match(r) for r in results]
     quality_report = audit_ranking(matches)
 
@@ -153,6 +157,7 @@ async def run_challenge_ranking(request: RankingRequest = RankingRequest()):
         "pool_size": len(candidates),
         "source_file": str(path),
         "ranked_count": len(matches),
+        "runtime_ms": runtime_ms,
         "quality_report": quality_report,
         "matches": matches,
     }

@@ -14,3 +14,6 @@ httpx
 aiofiles
 numpy
 scikit-learn
+joblib
+# Optional for offline embeddings precompute (not required at rank time):
+# sentence-transformers

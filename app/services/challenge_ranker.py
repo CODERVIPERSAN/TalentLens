@@ -1,11 +1,8 @@
 """
-TalentLens Pro Ranker — two-stage CPU-only engine for Redrob hackathon.
+TalentLens v4 Ranker — hybrid BM25 + TF-IDF + LTR + fraud detection.
 
-Stage 1 (Recall): Fast TF-IDF + title filter on full pool (100K in ~30s)
-Stage 2 (Precision): Deep multi-signal scoring on top finalists
-Stage 3 (Audit): Cross-check, confidence, honeypot scan via rank_auditor.py
-
-No network calls. Designed to beat keyword-stuffing traps.
+PUB constraints: CPU only, ≤5 min, ≤16GB RAM, NO network during ranking.
+Pre-compute offline: python scripts/precompute_ranker_assets.py
 """
 
 from __future__ import annotations
@@ -21,7 +18,21 @@ from typing import Any
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
+from app.services.bm25_recall import BM25Index
+from app.services.fraud_detector import fraud_flags, fraud_penalty, fraud_risk_score, is_honeypot
+from app.services.ltr_ranker import (
+    embedding_similarity,
+    extract_features,
+    load_embedding_index,
+    load_ltr_model,
+    predict_ltr,
+)
 from app.services.rank_auditor import cross_check_candidate
+from app.services.rank_features import (
+    has_career_ir_proof,
+    is_ghost_unavailable,
+    is_research_only,
+)
 
 # ── JD-aligned skill & title lexicons ──────────────────────────────────────
 
@@ -78,7 +89,9 @@ PRODUCT_INDICATORS = {
     "production", "deployed", "shipped", "a/b", "million users",
 }
 
-RECALL_TOP_K = 2500  # Stage-1 shortlist size for 100K pool
+RECALL_TOP_K = 5000  # Stage-1 shortlist (BM25 + lexical fusion)
+RULE_WEIGHT = 0.52
+LTR_WEIGHT = 0.48
 
 
 @dataclass
@@ -133,14 +146,20 @@ def _parse_date(value: str | None) -> date | None:
         return None
 
 
-def _fast_recall_score(candidate: dict[str, Any], semantic: float) -> float:
+def _fast_recall_score(candidate: dict[str, Any], semantic: float, bm25_norm: float = 0.0) -> float:
     """Stage-1 lightweight score for 100K recall."""
+    if is_honeypot(candidate):
+        return 0.0
     profile = candidate.get("profile", {})
     title = _title_score(profile.get("current_title", ""), profile.get("headline", ""))
-    hp = _honeypot_penalty(candidate)
-    if hp < 0.2:
+    if title <= 0.15:
         return 0.0
-    return title * 0.45 + semantic * 0.35 + _career_relevance_score(candidate) * 0.20
+    return (
+        title * 0.38
+        + semantic * 0.22
+        + bm25_norm * 0.20
+        + _career_relevance_score(candidate) * 0.20
+    )
 
 
 def _skill_trust_multiplier(candidate: dict[str, Any]) -> float:
@@ -311,6 +330,25 @@ def _langchain_trap_penalty(candidate: dict[str, Any], skills: set[str]) -> floa
     return 1.0
 
 
+def _ghost_penalty(signals: dict[str, Any]) -> float:
+    if is_ghost_unavailable(signals):
+        return 0.08
+    return 1.0
+
+
+def _research_only_penalty(text: str) -> float:
+    if is_research_only(text):
+        return 0.50
+    return 1.0
+
+
+def _career_boost_without_keywords(candidate: dict[str, Any], skill_component: float) -> float:
+    """JD Tier-5: career proof matters more than skill buzzwords."""
+    if skill_component < 0.35 and has_career_ir_proof(candidate):
+        return 1.18
+    return 1.0
+
+
 def _honeypot_penalty(candidate: dict[str, Any]) -> float:
     profile = candidate.get("profile", {})
     years = profile.get("years_of_experience", 0)
@@ -364,9 +402,11 @@ def _deep_score(
         _consulting_penalty(candidate)
         * _cv_only_penalty(skills, text)
         * _langchain_trap_penalty(candidate, skills)
-        * _honeypot_penalty(candidate)
+        * _research_only_penalty(text)
+        * fraud_penalty(candidate)
     )
-    final = base * behavioral * penalties
+    career_boost = _career_boost_without_keywords(candidate, skill_component)
+    final = base * behavioral * penalties * career_boost
 
     breakdown = {
         "skills": round(skill_component, 3),
@@ -379,6 +419,7 @@ def _deep_score(
         "education": round(edu_component, 3),
         "behavioral": round(behavioral, 3),
         "penalties": round(penalties, 3),
+        "career_boost": round(career_boost, 3),
         "final": round(final, 3),
     }
     return final, breakdown
@@ -410,6 +451,20 @@ def _generate_reasoning(candidate: dict[str, Any], breakdown: dict[str, float], 
     return "; ".join(parts) + "."
 
 
+def _semantic_scores(texts: list[str], job_description: str) -> list[float]:
+    vectorizer = TfidfVectorizer(
+        max_features=12000, ngram_range=(1, 2), stop_words="english", sublinear_tf=True,
+    )
+    tfidf = vectorizer.fit_transform(texts + [job_description.lower()])
+    return cosine_similarity(tfidf[:-1], tfidf[-1]).flatten().tolist()
+
+
+def _jd_overlap_recall(text: str) -> float:
+    """Fast lexical recall without full TF-IDF — used on 100K pool."""
+    hits = sum(1 for term in CORE_SKILLS if term in text)
+    return min(hits / 8.0, 1.0)
+
+
 def rank_candidates(
     candidates: list[dict[str, Any]],
     job_description: str,
@@ -419,38 +474,102 @@ def rank_candidates(
         return []
 
     texts = [_candidate_text(c) for c in candidates]
-    vectorizer = TfidfVectorizer(max_features=12000, ngram_range=(1, 2), stop_words="english", sublinear_tf=True)
-    tfidf = vectorizer.fit_transform(texts + [job_description.lower()])
-    semantics = cosine_similarity(tfidf[:-1], tfidf[-1]).flatten()
+    ltr_model = load_ltr_model()
+    emb_index = load_embedding_index()
+    jd_emb = None
+    if emb_index is not None:
+        try:
+            import numpy as np
+            from pathlib import Path
+            p = Path("data/ranker_cache/jd_embedding.npy")
+            if p.exists():
+                jd_emb = np.load(p)
+        except Exception:
+            jd_emb = None
 
-    # ── Stage 1: recall shortlist for large pools ──────────────────────────
+    # ── Stage 1: BM25 + lexical fusion recall ─────────────────────────────
     if len(candidates) > 500:
-        recall_scored = [
-            (i, _fast_recall_score(candidates[i], float(semantics[i])))
-            for i in range(len(candidates))
-        ]
+        bm25 = BM25Index(texts)
+        bm25_hits = {i: s for i, s in bm25.top_k(job_description, RECALL_TOP_K * 2)}
+        bm25_max = max(bm25_hits.values()) if bm25_hits else 1.0
+
+        recall_scored: list[tuple[int, float]] = []
+        for i, c in enumerate(candidates):
+            lex = _jd_overlap_recall(texts[i])
+            bm25_norm = bm25_hits.get(i, 0.0) / bm25_max
+            score = _fast_recall_score(c, lex, bm25_norm)
+            if score > 0:
+                recall_scored.append((i, score))
         recall_scored.sort(key=lambda x: -x[1])
-        shortlist_idx = [i for i, s in recall_scored[:RECALL_TOP_K] if s > 0]
+        shortlist_idx = list(dict.fromkeys(
+            [i for i, _ in recall_scored[:RECALL_TOP_K]]
+            + [i for i in bm25_hits if bm25_hits[i] > bm25_max * 0.3][:RECALL_TOP_K // 2]
+        ))[:RECALL_TOP_K]
+        bm25_map = {i: bm25_hits.get(i, 0.0) for i in shortlist_idx}
+        shortlist_texts = [texts[i] for i in shortlist_idx]
+        semantics_short = _semantic_scores(shortlist_texts, job_description)
+        semantic_map = {shortlist_idx[i]: semantics_short[i] for i in range(len(shortlist_idx))}
     else:
         shortlist_idx = list(range(len(candidates)))
+        bm25_map = {i: 0.0 for i in shortlist_idx}
+        semantics_all = _semantic_scores(texts, job_description)
+        semantic_map = {i: semantics_all[i] for i in range(len(candidates))}
 
-    # ── Stage 2: deep precision scoring ──────────────────────────────────
+    # ── Stage 2+3: deep rule score + LTR blend + fraud gate ──────────────
     scored: list[tuple[str, float, dict, dict, dict]] = []
     for idx in shortlist_idx:
         c = candidates[idx]
-        final, breakdown = _deep_score(c, texts[idx], float(semantics[idx]))
-        audit = cross_check_candidate(c, breakdown)
-        if audit.get("fit_tier") == "Concern" and breakdown.get("penalties", 1) < 0.15:
+        sem = float(semantic_map.get(idx, 0.0))
+        if emb_index is not None and jd_emb is not None:
+            emb_sim = embedding_similarity(c["candidate_id"], jd_emb, emb_index)
+            sem = sem * 0.4 + emb_sim * 0.6
+
+        final, breakdown = _deep_score(c, texts[idx], sem)
+        breakdown["bm25"] = round(min(bm25_map.get(idx, 0) / 40.0, 1.0), 3)
+
+        signals = c.get("redrob_signals", {})
+        skills = _skill_names(c)
+        skill_trust = _skill_trust_multiplier(c)
+        assessment = _assessment_boost(signals)
+        product_co = sum(
+            1 for j in c.get("career_history", [])
+            if any(pc in j.get("company", "").lower() for pc in PRODUCT_COMPANIES)
+        ) / max(len(c.get("career_history", [])), 1)
+        ir_jobs = sum(
+            1 for j in c.get("career_history", [])
+            if any(kw in f"{j.get('title','')} {j.get('description','')}".lower() for kw in CAREER_IR_KEYWORDS)
+        ) / max(len(c.get("career_history", [])), 1)
+
+        feat = extract_features(
+            breakdown, bm25_map.get(idx, 0.0), skill_trust, assessment,
+            product_co, ir_jobs, signals, fraud_risk_score(c),
+        )
+        ltr_score = predict_ltr(ltr_model, feat)
+        blended = RULE_WEIGHT * final + LTR_WEIGHT * ltr_score
+        breakdown["ltr"] = round(ltr_score, 3)
+        breakdown["blended"] = round(blended, 3)
+        breakdown["final"] = round(blended, 3)
+
+        if is_honeypot(c) or breakdown.get("penalties", 1) < 0.10:
             continue
-        scored.append((c["candidate_id"], final, c, breakdown, audit))
+
+        audit = cross_check_candidate(c, breakdown)
+        if audit.get("fit_tier") == "Concern" and breakdown.get("penalties", 1) < 0.20:
+            continue
+        scored.append((c["candidate_id"], blended, c, breakdown, audit))
 
     scored.sort(key=lambda x: (-x[1], x[0]))
 
-    # ── Stage 3: iterative re-rank — demote flagged traps in top band ─────
+    # ── Stage 4: demote fraud/traps from top band ────────────────────────
+    trap_flags = {
+        "KEYWORD_STUFFER_TRAP", "HONEYPOT_SUSPECT", "GHOST_UNAVAILABLE",
+        "RESEARCH_ONLY", "CV_ONLY_PROFILE", "ENDORSEMENT_FRAUD", "CONSULTING_ONLY",
+    }
     clean: list[tuple] = []
     demoted: list[tuple] = []
     for item in scored:
-        if item[4].get("audit_flags") and "KEYWORD_STUFFER_TRAP" in item[4]["audit_flags"]:
+        flags = set(item[4].get("audit_flags", []))
+        if flags & trap_flags:
             demoted.append(item)
         else:
             clean.append(item)
@@ -459,6 +578,7 @@ def rank_candidates(
 
     results: list[RankedCandidate] = []
     for rank_idx, (cid, raw, candidate, breakdown, audit) in enumerate(top, start=1):
+        audit = cross_check_candidate(candidate, breakdown, rank=rank_idx)
         normalized = max(0.01, round(1.0 - (rank_idx - 1) * 0.008, 4))
         profile = candidate.get("profile", {})
         results.append(RankedCandidate(

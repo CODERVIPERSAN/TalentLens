@@ -227,6 +227,7 @@ __MACOSX/
 # Large candidate pool (extract from zip into data/ locally)
 data/candidates.jsonl
 data/candidates.jsonl.gz
+data/ranker_cache/
 
 # Generated outputs
 data/submission.csv
