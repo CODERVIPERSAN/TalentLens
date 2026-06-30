@@ -22,10 +22,18 @@ export async function getCandidates(skip = 0, limit = 50, useSample = false) {
   return data
 }
 
-export async function runRanking(topN = 100, useSample = false) {
+export async function runRanking(topN = 100, useSample = false, options = {}) {
+  const {
+    useOllama = true,
+    ollamaTopN = 10,
+  } = options
   const { data } = await api.post('/challenge/rank', {
     use_sample: useSample,
     top_n: topN,
+    use_ollama: useOllama,
+    ollama_top_n: ollamaTopN,
+  }, {
+    timeout: 600000,
   })
   return data
 }
@@ -37,6 +45,13 @@ export async function getRankings(limit = 100) {
 
 export async function getAuditReport() {
   const { data } = await api.get('/challenge/audit')
+  return data
+}
+
+export async function generateMatchReasoning(candidateId) {
+  const { data } = await api.post(`/challenge/matches/${candidateId}/reasoning`, null, {
+    timeout: 60000,
+  })
   return data
 }
 
