@@ -1,74 +1,84 @@
-"""BM25 lexical recall with inverted index (fast on 100K+ docs)."""
+"""Memory-efficient BM25 — build stats in one pass, score in a second."""
 
 from __future__ import annotations
 
 import math
 import re
-from typing import Sequence
+from collections import Counter
+from typing import Iterator, Sequence
 
 
 _TOKEN = re.compile(r"[a-z0-9]+")
 
 
-def _tokenize(text: str) -> list[str]:
+def tokenize(text: str) -> list[str]:
     return _TOKEN.findall(text.lower())
 
 
-class BM25Index:
-    def __init__(self, corpus: Sequence[str], k1: float = 1.4, b: float = 0.75) -> None:
+class StreamingBM25:
+    """BM25 scorer built from corpus statistics (no full corpus stored)."""
+
+    def __init__(
+        self,
+        n_docs: int,
+        avgdl: float,
+        doc_freq: Counter[str],
+        k1: float = 1.4,
+        b: float = 0.75,
+    ) -> None:
+        self.n = n_docs
+        self.avgdl = avgdl
         self.k1 = k1
         self.b = b
-        self.docs: list[list[str]] = [_tokenize(t) for t in corpus]
-        self.n = len(self.docs)
-        self.avgdl = sum(len(d) for d in self.docs) / max(self.n, 1)
-        self.df: dict[str, int] = {}
-        self.postings: dict[str, list[tuple[int, int]]] = {}
-        for i, doc in enumerate(self.docs):
-            tf: dict[str, int] = {}
-            for term in doc:
-                tf[term] = tf.get(term, 0) + 1
-            for term, freq in tf.items():
-                self.df[term] = self.df.get(term, 0) + 1
-                self.postings.setdefault(term, []).append((i, freq))
-        self.idf: dict[str, float] = {
-            t: math.log(1 + (self.n - df + 0.5) / (df + 0.5))
-            for t, df in self.df.items()
+        self.idf = {
+            t: math.log(1 + (n_docs - df + 0.5) / (df + 0.5))
+            for t, df in doc_freq.items()
         }
-        self.doc_lens = [len(d) for d in self.docs]
 
-    def score_document(self, doc_idx: int, query_terms: list[str]) -> float:
-        doc = self.docs[doc_idx]
-        if not doc:
+    @classmethod
+    def from_token_streams(cls, token_streams: Iterator[list[str]]) -> StreamingBM25:
+        doc_freq: Counter[str] = Counter()
+        total_len = 0
+        n = 0
+        for tokens in token_streams:
+            n += 1
+            total_len += len(tokens)
+            for t in set(tokens):
+                doc_freq[t] += 1
+        avgdl = total_len / max(n, 1)
+        return cls(n, avgdl, doc_freq)
+
+    def score(self, tokens: list[str]) -> float:
+        if not tokens:
             return 0.0
-        dl = self.doc_lens[doc_idx]
-        tf: dict[str, int] = {}
-        for t in doc:
-            tf[t] = tf.get(t, 0) + 1
+        dl = len(tokens)
+        tf: Counter[str] = Counter(tokens)
         s = 0.0
-        for term in query_terms:
-            if term not in tf:
+        for term, freq in tf.items():
+            idf = self.idf.get(term)
+            if idf is None:
                 continue
-            idf = self.idf.get(term, 0.0)
-            freq = tf[term]
             denom = freq + self.k1 * (1 - self.b + self.b * dl / self.avgdl)
             s += idf * (freq * (self.k1 + 1)) / denom
         return s
 
+
+class BM25Index:
+    """In-memory BM25 for small corpora (sample pool)."""
+
+    def __init__(self, corpus: Sequence[str], k1: float = 1.4, b: float = 0.75) -> None:
+        self._bm25 = StreamingBM25.from_token_streams(tokenize(t) for t in corpus)
+        self._tokenized = [tokenize(t) for t in corpus]
+        self.n = len(corpus)
+
     def top_k(self, query: str, k: int) -> list[tuple[int, float]]:
-        qterms = _tokenize(query)
+        qterms = tokenize(query)
         if not qterms:
             return []
-        # Accumulate scores only for docs containing query terms
-        accum: dict[int, float] = {}
-        for term in qterms:
-            idf = self.idf.get(term, 0.0)
-            if idf <= 0:
-                continue
-            for doc_idx, freq in self.postings.get(term, []):
-                dl = self.doc_lens[doc_idx]
-                denom = freq + self.k1 * (1 - self.b + self.b * dl / self.avgdl)
-                accum[doc_idx] = accum.get(doc_idx, 0.0) + idf * (freq * (self.k1 + 1)) / denom
-        if not accum:
-            return []
-        scored = sorted(accum.items(), key=lambda x: -x[1])
+        scored = [
+            (i, self._bm25.score(self._tokenized[i]))
+            for i in range(self.n)
+            if any(t in self._tokenized[i] for t in qterms)
+        ]
+        scored.sort(key=lambda x: -x[1])
         return scored[:k]

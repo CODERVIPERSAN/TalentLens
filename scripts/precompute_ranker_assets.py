@@ -23,7 +23,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from app.services.challenge_ranker import _candidate_text, load_candidates
+from app.services.challenge_ranker import _candidate_text, _light_recall_text, iter_candidates, load_candidates
 from app.services.ltr_ranker import CACHE_DIR, EMB_PATH, FEATURE_NAMES, IDS_PATH, MODEL_PATH, extract_features
 from app.services.fraud_detector import fraud_risk_score
 
@@ -59,8 +59,14 @@ def _train_ltr(candidates_path: Path, job_text: str) -> None:
     )
     from app.services.bm25_recall import BM25Index
 
-    print("Loading candidates for LTR training...")
-    candidates = load_candidates(candidates_path)
+    print("Loading candidates for LTR training (streamed sample)...")
+    step = 16
+    candidates = []
+    for i, c in enumerate(iter_candidates(candidates_path)):
+        if i % step == 0:
+            candidates.append(c)
+        if len(candidates) >= 6000:
+            break
     texts = [_candidate_text(c) for c in candidates]
     bm25 = BM25Index(texts)
     bm25_top = {i: s for i, s in bm25.top_k(job_text, min(8000, len(candidates)))}

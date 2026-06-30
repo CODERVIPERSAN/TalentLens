@@ -8,18 +8,20 @@ Pre-compute offline: python scripts/precompute_ranker_assets.py
 from __future__ import annotations
 
 import csv
+import gc
 import gzip
+import heapq
 import json
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
-from app.services.bm25_recall import BM25Index
-from app.services.fraud_detector import fraud_flags, fraud_penalty, fraud_risk_score, is_honeypot
+from app.services.bm25_recall import BM25Index, StreamingBM25, tokenize
+from app.services.fraud_detector import fraud_penalty, fraud_risk_score, is_honeypot
 from app.services.ltr_ranker import (
     embedding_similarity,
     extract_features,
@@ -27,6 +29,7 @@ from app.services.ltr_ranker import (
     load_ltr_model,
     predict_ltr,
 )
+from app.services.memory_config import low_memory_mode, recall_top_k, release_memory, tfidf_max_features, use_embedding_cache
 from app.services.rank_auditor import cross_check_candidate
 from app.services.rank_features import (
     has_career_ir_proof,
@@ -89,9 +92,10 @@ PRODUCT_INDICATORS = {
     "production", "deployed", "shipped", "a/b", "million users",
 }
 
-RECALL_TOP_K = 5000  # Stage-1 shortlist (BM25 + lexical fusion)
+RECALL_TOP_K = 5000  # overridden by memory_config.recall_top_k() for large pools
 RULE_WEIGHT = 0.52
 LTR_WEIGHT = 0.48
+STREAMING_JSONL_MIN_BYTES = 5_000_000
 
 
 @dataclass
@@ -105,15 +109,48 @@ class RankedCandidate:
     audit: dict[str, Any] = field(default_factory=dict)
 
 
-def load_candidates(path: Path) -> list[dict[str, Any]]:
+def iter_candidates(path: Path) -> Iterator[dict[str, Any]]:
+    """Stream candidates one at a time (memory-safe for 100K jsonl)."""
     suffixes = "".join(path.suffixes).lower()
     if suffixes == ".json":
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
-        return data if isinstance(data, list) else [data]
+        items = data if isinstance(data, list) else [data]
+        yield from items
+        return
     opener = gzip.open(path, "rt", encoding="utf-8") if suffixes.endswith(".gz") else open(path, encoding="utf-8")
     with opener as f:
-        return [json.loads(line) for line in f if line.strip()]
+        for line in f:
+            if line.strip():
+                yield json.loads(line)
+
+
+def load_candidates(path: Path) -> list[dict[str, Any]]:
+    """Load all candidates — use only for small pools (sample JSON)."""
+    return list(iter_candidates(path))
+
+
+def find_candidate_by_id(path: Path, candidate_id: str) -> dict[str, Any] | None:
+    for candidate in iter_candidates(path):
+        if candidate.get("candidate_id") == candidate_id:
+            return candidate
+    return None
+
+
+def _light_recall_text(candidate: dict[str, Any]) -> str:
+    """Compact profile text for recall/BM25 — caps long fields to save RAM."""
+    profile = candidate.get("profile", {})
+    parts = [
+        profile.get("headline", ""), profile.get("current_title", ""),
+        profile.get("current_company", ""), profile.get("location", ""),
+        profile.get("summary", "")[:300],
+    ]
+    parts.extend(s.get("name", "") for s in candidate.get("skills", [])[:14])
+    for job in candidate.get("career_history", [])[:4]:
+        parts.extend([job.get("title", ""), job.get("company", "")])
+        desc = job.get("description", "") or ""
+        parts.append(desc[:220])
+    return " ".join(p for p in parts if p).lower()
 
 
 def _candidate_text(candidate: dict[str, Any]) -> str:
@@ -453,16 +490,88 @@ def _generate_reasoning(candidate: dict[str, Any], breakdown: dict[str, float], 
 
 def _semantic_scores(texts: list[str], job_description: str) -> list[float]:
     vectorizer = TfidfVectorizer(
-        max_features=12000, ngram_range=(1, 2), stop_words="english", sublinear_tf=True,
+        max_features=tfidf_max_features(),
+        ngram_range=(1, 2),
+        stop_words="english",
+        sublinear_tf=True,
     )
     tfidf = vectorizer.fit_transform(texts + [job_description.lower()])
     return cosine_similarity(tfidf[:-1], tfidf[-1]).flatten().tolist()
+    # vectorizer + matrix freed when function returns
 
 
 def _jd_overlap_recall(text: str) -> float:
     """Fast lexical recall without full TF-IDF — used on 100K pool."""
     hits = sum(1 for term in CORE_SKILLS if term in text)
     return min(hits / 8.0, 1.0)
+
+
+def _stream_recall_shortlist(path: Path, job_description: str) -> tuple[list[dict[str, Any]], int]:
+    """
+    Two-pass streaming recall — never holds 100K full profiles in RAM.
+    Pass 1: BM25 corpus stats. Pass 2: recall heap + load shortlist only.
+    """
+    k = recall_top_k()
+
+    def _token_stream() -> Iterator[list[str]]:
+        for candidate in iter_candidates(path):
+            yield tokenize(_light_recall_text(candidate))
+
+    bm25 = StreamingBM25.from_token_streams(_token_stream())
+    release_memory()
+
+    heap: list[tuple[float, str]] = []
+    bm25_heap: list[tuple[float, str]] = []
+    bm25_target = k // 2
+
+    pool_size = 0
+    for candidate in iter_candidates(path):
+        pool_size += 1
+        cid = candidate["candidate_id"]
+        light = _light_recall_text(candidate)
+        tokens = tokenize(light)
+        bscore = bm25.score(tokens)
+
+        if len(bm25_heap) < bm25_target:
+            heapq.heappush(bm25_heap, (bscore, cid))
+        elif bscore > bm25_heap[0][0]:
+            heapq.heapreplace(bm25_heap, (bscore, cid))
+
+        lex = _jd_overlap_recall(light)
+        bm25_norm = min(bscore / 40.0, 1.0)
+        score = _fast_recall_score(candidate, lex, bm25_norm)
+        if score <= 0:
+            continue
+        entry = (-score, cid)
+        if len(heap) < k:
+            heapq.heappush(heap, entry)
+        elif score > -heap[0][0]:
+            heapq.heapreplace(heap, entry)
+
+    recall_ids = {cid for _, cid in heap}
+    recall_ids.update(cid for _, cid in bm25_heap)
+    target = len(recall_ids)
+    del heap, bm25_heap, bm25
+    release_memory()
+
+    shortlist: list[dict[str, Any]] = []
+    for candidate in iter_candidates(path):
+        cid = candidate["candidate_id"]
+        if cid in recall_ids:
+            shortlist.append(candidate)
+            if len(shortlist) >= target:
+                break
+    recall_ids.clear()
+    release_memory()
+    return shortlist, pool_size
+
+
+def rank_candidates_from_path(path: Path, job_description: str, top_n: int = 100) -> list[RankedCandidate]:
+    """Memory-safe entry point for large jsonl pools."""
+    shortlist, pool_size = _stream_recall_shortlist(path, job_description)
+    results = rank_candidates(shortlist, job_description, top_n=top_n)
+    release_memory()
+    return results
 
 
 def rank_candidates(
@@ -475,23 +584,27 @@ def rank_candidates(
 
     texts = [_candidate_text(c) for c in candidates]
     ltr_model = load_ltr_model()
-    emb_index = load_embedding_index()
+    emb_index = load_embedding_index() if use_embedding_cache() else None
     jd_emb = None
     if emb_index is not None:
         try:
             import numpy as np
-            from pathlib import Path
             p = Path("data/ranker_cache/jd_embedding.npy")
             if p.exists():
-                jd_emb = np.load(p)
+                jd_emb = np.load(p, mmap_mode="r")
         except Exception:
             jd_emb = None
 
-    # ── Stage 1: BM25 + lexical fusion recall ─────────────────────────────
+    recall_k = recall_top_k()
+
+    # ── Stage 1: BM25 + lexical fusion recall (in-memory shortlist only) ─
     if len(candidates) > 500:
-        bm25 = BM25Index(texts)
-        bm25_hits = {i: s for i, s in bm25.top_k(job_description, RECALL_TOP_K * 2)}
+        light_texts = [_light_recall_text(c) for c in candidates]
+        bm25 = BM25Index(light_texts)
+        bm25_hits = {i: s for i, s in bm25.top_k(job_description, recall_k * 2)}
         bm25_max = max(bm25_hits.values()) if bm25_hits else 1.0
+        del light_texts, bm25
+        release_memory()
 
         recall_scored: list[tuple[int, float]] = []
         for i, c in enumerate(candidates):
@@ -502,13 +615,18 @@ def rank_candidates(
                 recall_scored.append((i, score))
         recall_scored.sort(key=lambda x: -x[1])
         shortlist_idx = list(dict.fromkeys(
-            [i for i, _ in recall_scored[:RECALL_TOP_K]]
-            + [i for i in bm25_hits if bm25_hits[i] > bm25_max * 0.3][:RECALL_TOP_K // 2]
-        ))[:RECALL_TOP_K]
-        bm25_map = {i: bm25_hits.get(i, 0.0) for i in shortlist_idx}
+            [i for i, _ in recall_scored[:recall_k]]
+            + [i for i in bm25_hits if bm25_hits[i] > bm25_max * 0.3][:recall_k // 2]
+        ))[:recall_k]
+        del recall_scored, bm25_hits
+        release_memory()
+
+        bm25_map = {i: 0.0 for i in shortlist_idx}
         shortlist_texts = [texts[i] for i in shortlist_idx]
         semantics_short = _semantic_scores(shortlist_texts, job_description)
         semantic_map = {shortlist_idx[i]: semantics_short[i] for i in range(len(shortlist_idx))}
+        del shortlist_texts, semantics_short
+        release_memory()
     else:
         shortlist_idx = list(range(len(candidates)))
         bm25_map = {i: 0.0 for i in shortlist_idx}
@@ -602,6 +720,7 @@ def rank_candidates(
             audit=audit,
         ))
 
+    release_memory()
     return results
 
 
@@ -619,9 +738,18 @@ def run_ranking(
     output_path: Path | None = None,
     top_n: int = 100,
 ) -> list[RankedCandidate]:
-    candidates = load_candidates(candidates_path)
     job_description = job_description_path.read_text(encoding="utf-8")
-    results = rank_candidates(candidates, job_description, top_n=top_n)
+    suffixes = "".join(candidates_path.suffixes).lower()
+    use_streaming = (
+        suffixes in (".jsonl", ".jsonl.gz")
+        and candidates_path.exists()
+        and candidates_path.stat().st_size >= STREAMING_JSONL_MIN_BYTES
+    )
+    if use_streaming:
+        results = rank_candidates_from_path(candidates_path, job_description, top_n=top_n)
+    else:
+        candidates = load_candidates(candidates_path)
+        results = rank_candidates(candidates, job_description, top_n=top_n)
     if output_path:
         write_submission(results, output_path)
     return results

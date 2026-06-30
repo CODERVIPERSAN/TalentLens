@@ -190,6 +190,7 @@ export default function Matches() {
   const [hasRun, setHasRun] = useState(false)
   const [search, setSearch] = useState('')
   const [error, setError] = useState(null)
+  const [memoryWarning, setMemoryWarning] = useState(null)
   const [useSample, setUseSample] = useState(false)
   const [stats, setStats] = useState(null)
   const [elapsedMs, setElapsedMs] = useState(0)
@@ -220,6 +221,7 @@ export default function Matches() {
   const handleRunRanking = async () => {
     setLoading(true)
     setError(null)
+    setMemoryWarning(null)
     setLastRunMs(null)
     const t0 = performance.now()
     try {
@@ -229,11 +231,13 @@ export default function Matches() {
       setJob(result.job)
       setMatches(result.matches)
       setQualityReport(result.quality_report)
+      setMemoryWarning(result.memory_warning || null)
       setPoolInfo({
         pool: result.pool,
         pool_size: result.pool_size,
         ranked_count: result.ranked_count,
         duration_ms: duration,
+        submission_file: result.submission_file,
       })
       setHasRun(true)
     } catch (err) {
@@ -284,6 +288,10 @@ export default function Matches() {
         </div>
       </div>
 
+      {memoryWarning && (
+        <div className="mb-4 p-4 bg-amber-50 border border-amber-200 rounded-lg text-amber-800 text-sm">{memoryWarning}</div>
+      )}
+
       {error && (
         <div className="mb-4 p-4 bg-red-50 border border-red-200 rounded-lg text-red-700">{error}</div>
       )}
@@ -293,7 +301,7 @@ export default function Matches() {
           <PoolSelector useSample={useSample} onChange={setUseSample} stats={stats} />
           {!useSample && (
             <p className="text-xs text-amber-600 mt-2">
-              Full pool ranking may take 1–3 minutes on CPU. Sample pool is instant (~2 sec).
+              Full pool uses streaming ranker (~1 min, ~300MB RAM). Close extra browser tabs if the system feels slow.
             </p>
           )}
         </div>
@@ -316,6 +324,11 @@ export default function Matches() {
               {poolInfo.duration_ms != null && (
                 <span className="ml-2 text-emerald-700 font-medium">
                   · {formatDuration(poolInfo.duration_ms)}
+                </span>
+              )}
+              {poolInfo.submission_file && (
+                <span className="block mt-1 text-xs text-gray-500">
+                  Saved to <code className="bg-gray-100 px-1 rounded">{poolInfo.submission_file}</code>
                 </span>
               )}
             </p>

@@ -17,6 +17,7 @@ SAMPLE_CANDIDATES = DATA_DIR / "sample_candidates.json"
 FULL_CANDIDATES = DATA_DIR / "candidates.jsonl"
 JOB_JSON = DATA_DIR / "job.json"
 JOB_DESCRIPTION = DATA_DIR / "job_description.txt"
+SUBMISSION_CSV = DATA_DIR / "submission.csv"
 
 
 def ensure_challenge_data() -> None:

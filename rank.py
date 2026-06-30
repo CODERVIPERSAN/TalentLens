@@ -28,8 +28,8 @@ def main() -> int:
     )
     parser.add_argument(
         "--out",
-        required=True,
-        help="Output CSV path",
+        default="data/submission.csv",
+        help="Output CSV path (default: data/submission.csv)",
     )
     parser.add_argument(
         "--top-n",

@@ -42,7 +42,23 @@
 | Top 50 | **95%** confidence | ✅ 96.1% avg |
 | Honeypot rate | < 10% | ✅ 0% |
 
-## Reproduce commands
+## Low-memory mode (~8GB RAM)
+
+Auto-enabled when `MemAvailable` &lt; 2.5GB (or `TALENTLENS_LOW_MEMORY=1`):
+
+| Behavior | Detail |
+|----------|--------|
+| Streaming rank | 3-pass jsonl — never loads 100K profiles at once |
+| Persist submission | Auto-writes `data/submission.csv` after UI rank or `rank.py` |
+| Recall shortlist | 3000 (vs 5000) |
+| TF-IDF features | 6000 (vs 10000) |
+| Embedding cache | Skipped at rank time |
+
+```bash
+# Force low-memory behavior
+TALENTLENS_LOW_MEMORY=1 python rank.py --candidates data/candidates.jsonl --out team_xxx.csv
+```
+
 
 ```bash
 # One-time offline (allowed)

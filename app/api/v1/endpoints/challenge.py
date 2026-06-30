@@ -8,12 +8,19 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.services.challenge_data import (
+    SUBMISSION_CSV,
     get_candidates_path,
     get_data_sources,
     get_job,
     load_candidates_page,
 )
-from app.services.challenge_ranker import load_candidates, rank_candidates, write_submission
+from app.services.challenge_ranker import (
+    find_candidate_by_id,
+    rank_candidates,
+    rank_candidates_from_path,
+    write_submission,
+)
+from app.services.memory_config import low_memory_mode
 from app.services.rank_auditor import audit_ranking
 
 router = APIRouter()
@@ -72,7 +79,10 @@ async def get_challenge_stats():
         "default_pool": meta["default_pool"],
         "active_ranker_file": meta["active_ranker_file"],
         "sources": meta["sources"],
-        "ranker_version": "pro-v4-hybrid-ltr",
+        "ranker_version": "pro-v4-low-mem" if low_memory_mode() else "pro-v4-hybrid-ltr",
+        "low_memory_mode": low_memory_mode(),
+        "recommend_sample_pool": False,
+        "streaming_ranker": True,
     }
 
 
@@ -117,10 +127,10 @@ async def get_challenge_candidate(candidate_id: str, use_sample: bool = True):
         path = get_candidates_path(use_sample=use_sample)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    for candidate in load_candidates(path):
-        if candidate["candidate_id"] == candidate_id:
-            return candidate
-    raise HTTPException(status_code=404, detail="Candidate not found")
+    candidate = find_candidate_by_id(path, candidate_id)
+    if candidate is None:
+        raise HTTPException(status_code=404, detail="Candidate not found")
+    return candidate
 
 
 @router.post("/rank", response_model=RankingResponse)
@@ -137,12 +147,22 @@ async def run_challenge_ranking(request: RankingRequest = RankingRequest()):
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    candidates = load_candidates(path)
-    top_n = min(request.top_n, len(candidates), 100)
+    top_n = min(request.top_n, 100)
     t0 = time.perf_counter()
-    results = rank_candidates(candidates, job_description, top_n=top_n)
+    if request.use_sample:
+        from app.services.challenge_ranker import load_candidates
+        candidates = load_candidates(path)
+        pool_size = len(candidates)
+        results = rank_candidates(candidates, job_description, top_n=min(top_n, pool_size))
+    else:
+        pool_size = get_data_sources().get("full_count") or 100000
+        results = rank_candidates_from_path(path, job_description, top_n=top_n)
     runtime_ms = round((time.perf_counter() - t0) * 1000)
     matches = [_serialize_match(r) for r in results]
+
+    # Persist submission CSV on disk (same format as rank.py)
+    write_submission(results, SUBMISSION_CSV)
+
     quality_report = audit_ranking(matches)
 
     payload = {
@@ -154,10 +174,16 @@ async def run_challenge_ranking(request: RankingRequest = RankingRequest()):
             "experience_range": job.get("experience_range"),
         },
         "pool": "sample" if request.use_sample else "full",
-        "pool_size": len(candidates),
+        "pool_size": pool_size,
         "source_file": str(path),
         "ranked_count": len(matches),
         "runtime_ms": runtime_ms,
+        "submission_file": str(SUBMISSION_CSV.resolve()),
+        "memory_warning": (
+            "Low RAM — close extra browser tabs before ranking. Uses streaming (~300MB peak)."
+            if low_memory_mode() and not request.use_sample
+            else None
+        ),
         "quality_report": quality_report,
         "matches": matches,
     }
