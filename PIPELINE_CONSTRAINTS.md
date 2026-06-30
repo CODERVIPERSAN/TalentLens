@@ -9,7 +9,7 @@
 | **CPU only** | No GPU during ranking | `uses_gpu_for_inference: false` — sklearn + BM25 + optional ST embeddings on CPU |
 | **Time limit** | ≤ 5 minutes on 100K | Benchmark: **~2.5 min** with LTR; **~1.9 min** without embeddings |
 | **Memory** | ≤ 16 GB RAM | Stream jsonl load; shortlist 5K for deep scoring; mmap embeddings |
-| **No network** | Zero API calls during `rank.py` | No OpenAI/LLM at rank time; precompute offline only |
+| **No network** | Zero API calls during `rank.py` | No OpenAI/remote LLM at rank time; optional **local Ollama** via `--ollama` (localhost only) |
 | **Output format** | CSV: `candidate_id,rank,score,reasoning` × 100 rows | `validate_submission.py` passes |
 | **Honeypots** | ~80 fraud profiles; **>10% in top-100 = disqualified** | `fraud_detector.py` — timeline, notice>180d, endorsement fraud |
 | **Filename** | `team_xxx.csv` (participant ID) | Rename at submit |
@@ -67,6 +67,11 @@ python scripts/precompute_ranker_assets.py
 # Submission (must finish ≤5 min, no network)
 python rank.py --candidates data/candidates.jsonl --out team_xxx.csv --top-n 100
 python validate_submission.py team_xxx.csv
+
+# Optional: local Llama reasoning (Ollama on localhost — add ~2s per rank enriched)
+python rank.py --candidates data/candidates.jsonl --out team_xxx.csv --ollama --ollama-top-n 10
+# Or post-pass on an existing CSV:
+python scripts/enrich_reasoning_ollama.py --input data/submission.csv --candidates data/candidates.jsonl --top-n 10
 
 # Compliance tests
 python scripts/test_jd_compliance.py

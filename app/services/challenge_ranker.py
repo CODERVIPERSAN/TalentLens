@@ -31,6 +31,8 @@ from app.services.ltr_ranker import (
 )
 from app.services.memory_config import low_memory_mode, recall_top_k, release_memory, tfidf_max_features, use_embedding_cache
 from app.services.rank_auditor import cross_check_candidate
+from app.services.ollama_reasoning import OllamaConfig, enrich_ranked_reasoning
+from app.services.reasoning_builder import build_reasoning
 from app.services.rank_features import (
     has_career_ir_proof,
     is_ghost_unavailable,
@@ -113,6 +115,14 @@ class RankedCandidate:
     profile_summary: dict[str, Any]
     score_breakdown: dict[str, float] = field(default_factory=dict)
     audit: dict[str, Any] = field(default_factory=dict)
+    reasoning_source: str = "rule_based"
+
+
+_last_ollama_stats: dict[str, Any] | None = None
+
+
+def get_last_ollama_stats() -> dict[str, Any] | None:
+    return _last_ollama_stats
 
 
 def iter_candidates(path: Path) -> Iterator[dict[str, Any]]:
@@ -503,30 +513,13 @@ def _deep_score(
     return final, breakdown
 
 
-def _generate_reasoning(candidate: dict[str, Any], breakdown: dict[str, float], audit: dict[str, Any]) -> str:
-    profile = candidate.get("profile", {})
-    signals = candidate.get("redrob_signals", {})
-    skills = _skill_names(candidate)
-    core = [s for s in sorted(skills) if any(c in s for c in ("python", "embed", "retriev", "rank", "llm", "vector", "faiss", "nlp", "rag"))]
-
-    parts = [
-        f"{profile.get('current_title', 'Professional')} at {profile.get('current_company', 'N/A')} "
-        f"with {profile.get('years_of_experience', 0):.1f} yrs",
-    ]
-    if breakdown.get("career", 0) >= 0.45:
-        parts.append("shipped ranking/retrieval/production systems in career history")
-    if core:
-        parts.append(f"{len(core)} core AI/IR skills including {', '.join(core[:3])}")
-    parts.append(f"based in {profile.get('location', 'unknown')}")
-    rr = signals.get("recruiter_response_rate")
-    if isinstance(rr, (int, float)):
-        parts.append(f"response rate {rr:.2f}")
-    notice = signals.get("notice_period_days")
-    if isinstance(notice, int) and notice > 60:
-        parts.append(f"notice {notice}d is a concern")
-    if audit.get("fit_tier") == "Strong Fit":
-        parts.append("high cross-check confidence")
-    return "; ".join(parts) + "."
+def _generate_reasoning(
+    candidate: dict[str, Any],
+    breakdown: dict[str, float],
+    audit: dict[str, Any],
+    rank: int = 0,
+) -> str:
+    return build_reasoning(candidate, breakdown, audit, rank)
 
 
 def _semantic_scores(texts: list[str], job_description: str) -> list[float]:
@@ -607,10 +600,15 @@ def _stream_recall_shortlist(path: Path, job_description: str) -> tuple[list[dic
     return shortlist, pool_size
 
 
-def rank_candidates_from_path(path: Path, job_description: str, top_n: int = 100) -> list[RankedCandidate]:
+def rank_candidates_from_path(
+    path: Path,
+    job_description: str,
+    top_n: int = 100,
+    ollama: OllamaConfig | None = None,
+) -> list[RankedCandidate]:
     """Memory-safe entry point for large jsonl pools."""
     shortlist, pool_size = _stream_recall_shortlist(path, job_description)
-    results = rank_candidates(shortlist, job_description, top_n=top_n)
+    results = rank_candidates(shortlist, job_description, top_n=top_n, ollama=ollama)
     release_memory()
     return results
 
@@ -619,6 +617,7 @@ def rank_candidates(
     candidates: list[dict[str, Any]],
     job_description: str,
     top_n: int = 100,
+    ollama: OllamaConfig | None = None,
 ) -> list[RankedCandidate]:
     if not candidates:
         return []
@@ -704,6 +703,7 @@ def rank_candidates(
             product_co, ir_jobs, signals, fraud_risk_score(c),
         )
         ltr_score = predict_ltr(ltr_model, feat)
+        breakdown["rule_score"] = round(final, 3)
         blended = RULE_WEIGHT * final + LTR_WEIGHT * ltr_score
         breakdown["ltr"] = round(ltr_score, 3)
         breakdown["blended"] = round(blended, 3)
@@ -743,15 +743,18 @@ def rank_candidates(
     top = final_order[:top_n]
 
     results: list[RankedCandidate] = []
+    ollama_rows: list[tuple[RankedCandidate, dict[str, Any], dict[str, float], dict[str, Any]]] = []
+    global _last_ollama_stats
+    _last_ollama_stats = None
     for rank_idx, (cid, raw, candidate, breakdown, audit) in enumerate(top, start=1):
         audit = cross_check_candidate(candidate, breakdown, rank=rank_idx)
         normalized = max(0.01, round(1.0 - (rank_idx - 1) * 0.008, 4))
         profile = candidate.get("profile", {})
-        results.append(RankedCandidate(
+        ranked = RankedCandidate(
             candidate_id=cid,
             rank=rank_idx,
             score=normalized,
-            reasoning=_generate_reasoning(candidate, breakdown, audit),
+            reasoning=_generate_reasoning(candidate, breakdown, audit, rank=rank_idx),
             profile_summary={
                 "name": profile.get("anonymized_name"),
                 "title": profile.get("current_title"),
@@ -766,7 +769,26 @@ def rank_candidates(
             },
             score_breakdown=breakdown,
             audit=audit,
-        ))
+        )
+        results.append(ranked)
+        ollama_rows.append((ranked, candidate, breakdown, audit))
+
+    if ollama and ollama.enabled:
+        enriched, fallback = enrich_ranked_reasoning(
+            ollama_rows,
+            model=ollama.model,
+            top_n=ollama.top_n,
+            host=ollama.host,
+            timeout=ollama.timeout,
+        )
+        _last_ollama_stats = {
+            "enabled": True,
+            "available": True,
+            "model": ollama.model,
+            "top_n": ollama.top_n,
+            "enriched": enriched,
+            "fallback": fallback,
+        }
 
     release_memory()
     return results
@@ -785,6 +807,7 @@ def run_ranking(
     job_description_path: Path,
     output_path: Path | None = None,
     top_n: int = 100,
+    ollama: OllamaConfig | None = None,
 ) -> list[RankedCandidate]:
     job_description = job_description_path.read_text(encoding="utf-8")
     suffixes = "".join(candidates_path.suffixes).lower()
@@ -794,10 +817,12 @@ def run_ranking(
         and candidates_path.stat().st_size >= STREAMING_JSONL_MIN_BYTES
     )
     if use_streaming:
-        results = rank_candidates_from_path(candidates_path, job_description, top_n=top_n)
+        results = rank_candidates_from_path(
+            candidates_path, job_description, top_n=top_n, ollama=ollama,
+        )
     else:
         candidates = load_candidates(candidates_path)
-        results = rank_candidates(candidates, job_description, top_n=top_n)
+        results = rank_candidates(candidates, job_description, top_n=top_n, ollama=ollama)
     if output_path:
         write_submission(results, output_path)
     return results
