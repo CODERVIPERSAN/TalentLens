@@ -21,6 +21,16 @@ FIT_GOOD = "Good Fit"
 FIT_BORDERLINE = "Borderline"
 FIT_CONCERN = "Concern"
 
+NON_INDIA_MARKERS = {
+    "london", "dubai", "toronto", "berlin", "singapore", "sydney",
+    "united kingdom", "uae", "canada", "germany",
+}
+
+INDIA_LOCATIONS = {
+    "bangalore", "bengaluru", "pune", "noida", "delhi", "gurgaon", "gurugram",
+    "hyderabad", "mumbai", "chennai", "india", "kolkata", "jaipur", "kochi",
+}
+
 
 def cross_check_candidate(
     candidate: dict[str, Any],
@@ -82,6 +92,29 @@ def cross_check_candidate(
 
     if signals.get("notice_period_days", 0) > 90:
         flags.append("LONG_NOTICE_PERIOD")
+
+    loc = f"{profile.get('location', '')} {profile.get('country', '')}".lower()
+    company = profile.get("current_company", "").lower()
+    years = profile.get("years_of_experience", 0)
+    rr = signals.get("recruiter_response_rate", 1.0)
+
+    if "junior" in title.lower():
+        flags.append("JUNIOR_TITLE_FOR_SENIOR_ROLE")
+
+    if any(m in loc for m in NON_INDIA_MARKERS) and not any(c in loc for c in INDIA_LOCATIONS):
+        flags.append("NON_INDIA_LOCATION")
+
+    if any(s in company for s in ("genpact", "tcs", "infosys", "wipro", "accenture", "cognizant")):
+        flags.append("SERVICES_EMPLOYER_CURRENT")
+
+    if isinstance(rr, (int, float)) and rr < 0.35:
+        flags.append("LOW_RESPONSE_RATE")
+
+    if years > 14:
+        flags.append("EXPERIENCE_ABOVE_BAND")
+
+    if years < 4:
+        flags.append("EXPERIENCE_BELOW_BAND")
 
     core_signals = [title_s, career_s, skills_s]
     signal_mean = sum(core_signals) / 3

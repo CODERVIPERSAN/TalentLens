@@ -63,6 +63,12 @@ WEAK_TITLES = {
 CONSULTING_FIRMS = {
     "tcs", "infosys", "wipro", "accenture", "cognizant", "capgemini", "mindtree",
     "hcl", "tech mahindra", "ltimindtree", "mphasis", "persistent", "lti",
+    "genpact",
+}
+
+NON_INDIA_MARKERS = {
+    "london", "dubai", "toronto", "berlin", "singapore", "sydney", "new york",
+    "united kingdom", "uae", "canada", "germany", "usa", "united states",
 }
 
 PRODUCT_COMPANIES = {
@@ -244,6 +250,10 @@ def _behavioral_multiplier(signals: dict[str, Any]) -> float:
     rr = signals.get("recruiter_response_rate", 0)
     if rr >= 0.5:
         m *= 1.09
+    elif rr < 0.30:
+        m *= 0.74
+    elif rr < 0.40:
+        m *= 0.84
     elif rr < 0.15:
         m *= 0.80
     notice = signals.get("notice_period_days", 90)
@@ -279,6 +289,8 @@ def _title_score(title: str, headline: str) -> float:
     for weak in WEAK_TITLES:
         if weak in combined:
             return 0.12
+    if "junior" in combined:
+        return 0.48
     for strong in STRONG_TITLES:
         if strong in combined:
             return 1.0
@@ -322,11 +334,15 @@ def _education_boost(candidate: dict[str, Any]) -> float:
 def _experience_score(years: float) -> float:
     if 5 <= years <= 9:
         return 1.0
-    if 4 <= years <= 12:
-        return 0.85
-    if 3 <= years <= 15:
-        return 0.62
-    return 0.30
+    if 4 <= years <= 11:
+        return 0.88
+    if 3.5 <= years < 4:
+        return 0.58
+    if years < 3.5:
+        return 0.38
+    if 12 <= years <= 14:
+        return 0.72
+    return 0.48
 
 
 def _location_score(location: str, country: str) -> float:
@@ -335,7 +351,30 @@ def _location_score(location: str, country: str) -> float:
         return 1.0
     if country.lower() == "india":
         return 0.88
-    return 0.40
+    if any(m in loc for m in NON_INDIA_MARKERS):
+        return 0.28
+    return 0.45
+
+
+def _jd_fit_penalty(candidate: dict[str, Any]) -> float:
+    """Targeted penalties for JD minor-concern patterns."""
+    profile = candidate.get("profile", {})
+    company = profile.get("current_company", "").lower()
+    years = profile.get("years_of_experience", 0)
+    loc = f"{profile.get('location', '')} {profile.get('country', '')}".lower()
+    p = 1.0
+
+    if any(s in company for s in ("genpact", "tcs", "infosys", "wipro", "accenture", "cognizant")):
+        if not _consulting_penalty(candidate) <= 0.5:
+            p *= 0.76
+
+    if any(m in loc for m in NON_INDIA_MARKERS) and not any(c in loc for c in INDIA_LOCATIONS):
+        p *= 0.58
+
+    if years < 4:
+        p *= 0.72
+
+    return p
 
 
 def _consulting_penalty(candidate: dict[str, Any]) -> float:
@@ -443,7 +482,8 @@ def _deep_score(
         * fraud_penalty(candidate)
     )
     career_boost = _career_boost_without_keywords(candidate, skill_component)
-    final = base * behavioral * penalties * career_boost
+    jd_fit = _jd_fit_penalty(candidate)
+    final = base * behavioral * penalties * career_boost * jd_fit
 
     breakdown = {
         "skills": round(skill_component, 3),
@@ -457,6 +497,7 @@ def _deep_score(
         "behavioral": round(behavioral, 3),
         "penalties": round(penalties, 3),
         "career_boost": round(career_boost, 3),
+        "jd_fit": round(jd_fit, 3),
         "final": round(final, 3),
     }
     return final, breakdown
@@ -678,20 +719,27 @@ def rank_candidates(
 
     scored.sort(key=lambda x: (-x[1], x[0]))
 
-    # ── Stage 4: demote fraud/traps from top band ────────────────────────
+    # ── Stage 4: demote fraud/traps + JD soft concerns from top band ─────
     trap_flags = {
         "KEYWORD_STUFFER_TRAP", "HONEYPOT_SUSPECT", "GHOST_UNAVAILABLE",
         "RESEARCH_ONLY", "CV_ONLY_PROFILE", "ENDORSEMENT_FRAUD", "CONSULTING_ONLY",
     }
+    concern_flags = {
+        "JUNIOR_TITLE_FOR_SENIOR_ROLE", "NON_INDIA_LOCATION", "SERVICES_EMPLOYER_CURRENT",
+        "LOW_RESPONSE_RATE", "EXPERIENCE_ABOVE_BAND", "EXPERIENCE_BELOW_BAND",
+    }
     clean: list[tuple] = []
-    demoted: list[tuple] = []
+    soft_demoted: list[tuple] = []
+    hard_demoted: list[tuple] = []
     for item in scored:
         flags = set(item[4].get("audit_flags", []))
         if flags & trap_flags:
-            demoted.append(item)
+            hard_demoted.append(item)
+        elif flags & concern_flags:
+            soft_demoted.append(item)
         else:
             clean.append(item)
-    final_order = clean + demoted
+    final_order = clean + soft_demoted + hard_demoted
     top = final_order[:top_n]
 
     results: list[RankedCandidate] = []

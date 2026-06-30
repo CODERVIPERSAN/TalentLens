@@ -16,7 +16,7 @@ from app.services.rank_features import is_ghost_unavailable, is_weak_title, pars
 CV_ONLY = {"computer vision", "object detection", "speech", "robotics", "autonomous"}
 CONSULTING = {
     "tcs", "infosys", "wipro", "accenture", "cognizant", "capgemini", "mindtree",
-    "hcl", "tech mahindra", "ltimindtree", "mphasis", "persistent", "lti",
+    "hcl", "tech mahindra", "ltimindtree", "mphasis", "persistent", "lti", "genpact",
 }
 
 
