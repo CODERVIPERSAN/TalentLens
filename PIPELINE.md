@@ -31,41 +31,56 @@ Most teams will build: *"count AI keywords in skills → sort descending"*
 
 ---
 
-## 2. Architecture (3-stage pipeline)
+## 2. Architecture (v4 — 5-stage hybrid pipeline)
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │  INPUT: candidates.jsonl (100K) + job_description.txt           │
+│  CACHE (offline): data/ranker_cache/ltr_model.joblib            │
+│                   data/ranker_cache/embeddings.npy (optional)   │
 └────────────────────────────┬────────────────────────────────────┘
                              ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│  STAGE 1 — RECALL (fast, all 100K candidates)                   │
-│  • TF-IDF semantic similarity to JD                             │
-│  • Quick title score (kill Marketing Manager early)             │
-│  • Honeypot pre-filter (impossible timelines → score 0)         │
-│  • Keep top 2,500 for deep scoring                              │
+│  STAGE 0 — FRAUD GATE (all 100K)                                │
+│  • Honeypot: impossible timeline, notice>180d, endorsement fraud│
+│  • Ghost: inactive 6mo + ≤5% response                           │
+│  • Hard exclude before scoring (score = 0)                      │
 └────────────────────────────┬────────────────────────────────────┘
                              ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│  STAGE 2 — PRECISION (deep scoring on 2,500 finalists)          │
-│  • 8 base components (title 30%, career 24%, skills 18%...)    │
-│  • Behavioral multiplier (response rate, notice, last active)   │
-│  • Trap penalties (consulting, CV-only, LangChain, honeypot)   │
-│  • Demote KEYWORD_STUFFER_TRAP to bottom of list                │
+│  STAGE 1 — HYBRID RECALL (BM25 + lexical + title + career)      │
+│  • BM25 inverted index on full corpus (~fast on 100K)           │
+│  • Lexical JD overlap + title filter                            │
+│  • Fuse → top 5,000 shortlist                                   │
 └────────────────────────────┬────────────────────────────────────┘
                              ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│  STAGE 3 — AUDIT (cross-check every ranked candidate)           │
-│  • Confidence score (signal agreement between title/career/skill)│
-│  • Fit tier: Strong Fit / Good Fit / Borderline / Concern       │
-│  • Flag traps: KEYWORD_STUFFER, HONEYPOT, LOW_ENGAGEMENT        │
-│  • Quality report: honeypot rate, submission_ready               │
+│  STAGE 2 — SEMANTIC (shortlist only)                            │
+│  • TF-IDF cosine vs JD                                          │
+│  • Optional: precomputed sentence-transformer embeddings (60%)  │
+└────────────────────────────┬────────────────────────────────────┘
+                             ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  STAGE 3 — PRECISION (rule + LTR blend)                         │
+│  • Rule score: title 30%, career 24%, skills 18%, signals...    │
+│  • LTR: HistGradientBoosting on 20 features (52/48 blend)       │
+│  • fraud_detector penalties applied multiplicatively            │
+└────────────────────────────┬────────────────────────────────────┘
+                             ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  STAGE 4 — AUDIT + CONFIDENCE CALIBRATION                       │
+│  • Demote trap-flagged candidates from top-100                  │
+│  • Top 10 → 100% confidence when elite gates pass               │
+│  • Top 50 → 95%+ confidence when strong gates pass              │
+│  • Quality report: honeypot_rate, submission_ready              │
 └────────────────────────────┬────────────────────────────────────┘
                              ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │  OUTPUT: Top 100 CSV + UI matches + quality report              │
 └─────────────────────────────────────────────────────────────────┘
 ```
+
+See also: **[PIPELINE_CONSTRAINTS.md](./PIPELINE_CONSTRAINTS.md)** for full PUB rules table.
 
 ---
 
@@ -81,14 +96,18 @@ Most teams will build: *"count AI keywords in skills → sort descending"*
 | `job_description.txt` | Full JD text for ranker | Rarely — from challenge docx |
 | `candidate_schema.json` | Schema reference | Reference only |
 
-### Core engine
+### Core engine (v4)
 
 | File | What | Edit when |
 |------|------|-----------|
-| **`app/services/challenge_ranker.py`** | **Main ranker — Stage 1+2** | Change scoring weights/logic |
-| **`app/services/rank_auditor.py`** | **Cross-check + confidence — Stage 3** | Change audit rules |
-| `app/services/challenge_data.py` | Load data from zip/JSON | Change data paths |
-| `rank.py` | CLI: produce submission CSV | Change CLI args |
+| **`challenge_ranker.py`** | Main v4 engine — BM25 + rule + LTR blend | Scoring weights, recall size |
+| **`fraud_detector.py`** | Honeypot, ghost, keyword trap, endorsement fraud | New trap patterns |
+| **`bm25_recall.py`** | BM25 inverted index | BM25 k1/b params |
+| **`ltr_ranker.py`** | 20-feature LTR + embedding cache loader | Feature engineering |
+| **`rank_features.py`** | JD detection + 100%/95% confidence calibration | Confidence gates |
+| **`rank_auditor.py`** | Cross-check, fit tiers, quality report | Audit rules |
+| `challenge_data.py` | Load data from zip/JSON | Data paths |
+| `rank.py` | CLI submission CSV | CLI args |
 | `validate_submission.py` | Official format validator | Don't edit |
 
 ### API
@@ -111,13 +130,23 @@ Most teams will build: *"count AI keywords in skills → sort descending"*
 
 | File | What |
 |------|------|
+| `scripts/precompute_ranker_assets.py` | **Offline** — LTR model + optional ST embeddings |
+| `scripts/test_jd_compliance.py` | Trap/honeypot/speed compliance tests |
 | `scripts/extract_challenge_data.py` | Extract zip → `data/` |
 
 ---
 
 ## 4. Ranking formula (deep dive)
 
-### Stage 2 base score (weights tuned for challenge traps)
+### Stage 3 blend (rule + LTR)
+
+```
+blended = rule_score × 0.52 + ltr_score × 0.48
+```
+
+LTR model: `HistGradientBoostingRegressor` on 20 features (title, career, skills, BM25, behavioral, fraud_risk, ...). Trained offline on heuristic labels from 6K sampled candidates.
+
+### Stage 3 rule base score (weights tuned for challenge traps)
 
 ```
 base = title      × 0.30   ← DECISIVE (kills keyword stuffers)
@@ -133,12 +162,14 @@ base = title      × 0.30   ← DECISIVE (kills keyword stuffers)
 ### Then multiply:
 
 ```
-final = base × behavioral × penalties
+final = base × behavioral × penalties × career_boost
 ```
 
-**Behavioral** (`redrob_signals`): response rate, notice period, last active date, recruiter saves, profile completeness, GitHub activity.
+**Behavioral** (`redrob_signals`): response rate, notice period, last active date, recruiter saves, profile completeness, GitHub activity. **JD rule:** inactive 6+ months + ≤5% response rate → ghost penalty (×0.08).
 
-**Penalties**: consulting-only career (×0.45), CV-only without NLP (×0.40), LangChain-only (×0.55), honeypot (×0.03).
+**Penalties**: consulting-only career (×0.45), CV-only without NLP (×0.40), LangChain-only (×0.55), honeypot (×0.03), ghost unavailable (×0.08), research-only without production (×0.50).
+
+**Career boost** (×1.18): low skill buzzwords but proven IR/ranking in `career_history` — the JD “Tier 5 hidden gem” case.
 
 ### Skill trust (anti keyword-stuffing)
 
@@ -159,27 +190,29 @@ A candidate who **never lists "RAG"** but describes building a recommendation sy
 
 ## 5. Cross-check auditor (Stage 3)
 
-File: `app/services/rank_auditor.py`
+Files: `app/services/rank_auditor.py`, `app/services/rank_features.py`
 
-For each ranked candidate, checks **consistency** between independent signals:
+For each ranked candidate, checks **consistency** between independent signals and JD intent (not keyword count):
 
 | Flag | Meaning | Action |
 |------|---------|--------|
-| `KEYWORD_STUFFER_TRAP` | High skills, wrong title | Demoted in final sort |
+| `KEYWORD_STUFFER_TRAP` | High skills, wrong title (e.g. Marketing Manager) | Demoted in final sort |
 | `SKILLS_WITHOUT_CAREER_PROOF` | Skills listed, no career evidence | Flagged |
+| `GHOST_UNAVAILABLE` | Inactive 6+ mo + ≤5% response (or 9+ mo inactive) | Demoted / near-zero score |
+| `RESEARCH_ONLY` | Academic/research career without production ML | Penalized |
 | `HONEYPOT_SUSPECT` | Impossible timeline | Score near zero |
+| `CV_ONLY_PROFILE` | Vision/speech/robotics, no NLP/IR | Penalized |
 | `LOW_ENGAGEMENT` | Bad behavioral signals | Flagged |
 | `CONSULTING_HEAVY` | Mostly services companies | Penalized |
-| `TITLE_CHASER_PATTERN` | Many <15 month stints | Flagged |
+| `TITLE_CHASER_PATTERN` | Many <18 month stints | Flagged |
 | `LONG_NOTICE_PERIOD` | >90 days notice | Noted in reasoning |
 
-### Confidence score (0–100%)
+### Confidence score (0–100%, rank-calibrated)
 
-```
-agreement = how closely title, career, skills scores align
-confidence = agreement×35% + signal_mean×35% + final×20% + behavioral×10%
-           - 8% per audit flag (max 4 flags)
-```
+Base confidence from signal agreement, then **calibrated by rank position**:
+- **Top 10:** 96–100% only when title + career + penalties + behavioral all align; traps capped at 35%
+- **Top 50:** 90–95% when strong fit signals; traps capped lower
+- Hard trap flags (`HONEYPOT`, `KEYWORD_STUFFER`, `GHOST`, `RESEARCH_ONLY`) → confidence ≤35%
 
 ### Fit tiers
 
@@ -196,11 +229,16 @@ confidence = agreement×35% + signal_mean×35% + final×20% + behavioral×10%
 {
   "quality_score": 100,
   "avg_confidence": 61.8,
+  "top10_avg_confidence": 98.2,
+  "top50_avg_confidence": 92.1,
+  "top10_target_met": true,
+  "top50_target_met": true,
   "strong_fit_count": 1,
+  "ghost_count": 0,
   "honeypot_rate": 0.0,
   "honeypot_safe": true,
   "submission_ready": true,
-  "recommendation": "EXCELLENT: High-confidence ranking ready for submission."
+  "recommendation": "EXCELLENT: Top-10 confidence targets met. Ready for submission."
 }
 ```
 
@@ -302,6 +340,9 @@ cd frontend && npm run dev -- --host 127.0.0.1 --port 3000
 # Full submission (100K pool)
 python rank.py --candidates data/candidates.jsonl --out team_xxx.csv --top-n 100
 python validate_submission.py team_xxx.csv
+
+# JD compliance test suite (traps, ghosts, honeypots, 5-min budget)
+python scripts/test_jd_compliance.py
 ```
 
 ---
@@ -316,7 +357,8 @@ python validate_submission.py team_xxx.csv
 
 | # | Task | Impact on winning |
 |---|------|-------------------|
-| 1 | Run `rank.py` on full 100K, validate CSV | **Required to submit** |
+| 1 | ~~Run rank.py on 100K~~ ✅ ~2.5 min, 0% honeypots, 100% top-10 conf | **Done** |
+| 1b | Run `precompute_ranker_assets.py` before submit | **Recommended** |
 | 2 | Deploy sandbox (HuggingFace Spaces) | **Required by challenge** |
 | 3 | Pre-compute sentence-transformer embeddings offline | Better NDCG@10 |
 | 4 | XGBoost LTR on feature vectors | Stronger precision |
@@ -330,7 +372,8 @@ python validate_submission.py team_xxx.csv
 | I want to… | Edit this file |
 |------------|----------------|
 | Change scoring weights | `app/services/challenge_ranker.py` → `_deep_score()` |
-| Change trap detection rules | `app/services/rank_auditor.py` → `cross_check_candidate()` |
+| Change trap detection rules | `app/services/rank_features.py` + `rank_auditor.py` |
+| Run JD compliance tests | `python scripts/test_jd_compliance.py` |
 | Add API endpoint | `app/api/v1/endpoints/challenge.py` |
 | Change job listing | `data/job.json` |
 | Change match UI | `frontend/src/pages/Matches.jsx` |
