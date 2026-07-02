@@ -4,6 +4,7 @@ import Dashboard from './pages/Dashboard'
 import Candidates from './pages/Candidates'
 import Jobs from './pages/Jobs'
 import Matches from './pages/Matches'
+import Architecture from './pages/Architecture'
 
 function App() {
   return (
@@ -14,6 +15,7 @@ function App() {
           <Route path="candidates" element={<Candidates />} />
           <Route path="jobs" element={<Jobs />} />
           <Route path="matches" element={<Matches />} />
+          <Route path="architecture" element={<Architecture />} />
         </Route>
       </Routes>
     </Router>
